@@ -1,4 +1,4 @@
-# 网页爬虫控制台 - PRD + TDD v1.0
+# 网页爬虫控制台需求与技术文档（PRD + TDD v1.0）
 
 ## 1. 项目概述
 
@@ -241,3 +241,8 @@
 - API 字段字典 v1.0。
 - 核心数据表 SQL DDL 草案。
 - 前端线框图 v1.0（输入区、命令区、队列区、结果区、事件流）。
+
+已补齐文档（当前目录）：
+- [API_SPEC.md](./API_SPEC.md)
+- [DATABASE_DDL.sql](./DATABASE_DDL.sql)
+- [WIREFRAME.md](./WIREFRAME.md)
