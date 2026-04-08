@@ -308,3 +308,12 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks/<task_id>
 & .\myvenv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
+
+当前已安装的关键依赖：
+
+- `fastapi`、`uvicorn`：API 服务与本地启动
+- `requests`、`beautifulsoup4`：页面抓取与 HTML 解析
+- `httpx`：接口集成测试与后续服务间调用
+- `celery`、`redis`：后续任务队列与异步执行
+- `psycopg[binary]`：后续 PostgreSQL 接入
+- `websockets`：后续实时事件流能力
