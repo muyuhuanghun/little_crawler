@@ -246,3 +246,65 @@
 - [API_SPEC.md](./API_SPEC.md)
 - [DATABASE_DDL.sql](./DATABASE_DDL.sql)
 - [WIREFRAME.md](./WIREFRAME.md)
+
+---
+
+## 5. Day 1-2 当前实现
+
+当前仓库已经补上一个可运行的本地后端原型，覆盖排期中的 Day 1-2 范围：
+
+- SQLite 表结构初始化（`tasks`、`queue_items`、`event_logs`）
+- 任务状态机定义
+- `POST /v1/crawl/submit`
+- `GET /v1/tasks`
+- `GET /v1/tasks/{task_id}`
+- `GET /v1/health`
+- URL 基础校验与 SSRF 初步防护
+
+### 5.1 本地启动
+
+```powershell
+& .\myvenv\Scripts\Activate.ps1
+python main.py
+```
+
+启动后默认监听：
+
+```text
+http://127.0.0.1:8000
+```
+
+### 5.2 快速验证
+
+提交任务：
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/v1/crawl/submit `
+  -ContentType "application/json" `
+  -Body '{"url":"https://example.com/news","limit":10,"depth":1}'
+```
+
+查询任务列表：
+
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks
+```
+
+查询单个任务：
+
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks/<task_id>
+```
+
+### 5.3 当前虚拟环境
+
+项目内的 `myvenv` 已切换为基于官方 CPython 3.10 的干净虚拟环境。
+
+如需重新安装依赖：
+
+```powershell
+& .\myvenv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
