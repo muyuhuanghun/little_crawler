@@ -1,10 +1,17 @@
-# 网页爬虫控制台需求与技术文档（PRD + TDD v1.0）
+# 网页爬虫控制台需求与技术文档（PRD + TDD v1.1）
 
-## 1. 项目概述
+## 1. 项目定位
 
-本项目目标是把现有爬虫能力升级为“可在网页上控制的云服务工具”。
+本项目的最终目标不是“本地可运行脚本”，而是“可部署到服务器、可供他人访问的网站型爬虫控制台”。
 
-核心目标：
+目标形态：
+- 用户通过浏览器访问网站。
+- 前端页面提交 URL、控制任务、查看队列和结果。
+- 后端 API 负责鉴权、命令解析、任务调度、结果查询。
+- 爬虫与清洗逻辑在服务端执行。
+- 项目最终可部署到云服务器，并通过域名或公网 IP 访问。
+
+核心能力：
 - 在网页输入目标网站 URL 发起爬取。
 - 通过类命令行方式控制爬虫流程。
 - 实时可视化待爬取/已爬取/失败队列。
@@ -21,6 +28,7 @@
 - 支持命令控制：开始/暂停/继续/停止/状态查询/队列查看/清洗/导出。
 - 支持展示任务全生命周期与数据处理全流程。
 - 支持按 `task_id`、`request_id` 全链路追踪。
+- 支持部署到云端服务器供他人访问。
 
 ### 2.2 MVP 范围
 包含：
@@ -29,6 +37,7 @@
 - 任务与队列可视化。
 - 基础清洗与去重。
 - 结果表格展示与导出。
+- 单机部署版本的公网访问能力。
 
 不包含：
 - 多租户权限体系（RBAC）。
@@ -46,12 +55,12 @@
 ### 2.4 命令控制台
 支持命令：
 - `help`
-- `crawl start url=<...> limit=<...> depth=<...>`
+- `crawl start url=<...> limit=<...> depth=<...> [task_name=<...>]`
 - `crawl pause task_id=<...>`
 - `crawl resume task_id=<...>`
 - `crawl stop task_id=<...>`
 - `task status task_id=<...>`
-- `queue list task_id=<...> state=<pending|running|done|failed>`
+- `queue list task_id=<...> state=<pending|running|done|failed|canceled|all>`
 - `clean run task_id=<...>`
 - `export task_id=<...> format=<json|csv>`
 
@@ -79,13 +88,15 @@
 - 查询接口 P95 < 1 秒。
 - 任务支持暂停/恢复/重试。
 - 过程支持全链路追踪。
+- 部署后支持公网稳定访问。
 
 ### 2.8 安全要求
 - 仅允许 `http/https`。
 - SSRF 防护：禁止 localhost/内网/链路本地地址。
-- MVP 使用 API Key 鉴权。
+- MVP 使用 API Key 鉴权，后续可升级为账号体系。
 - 命令白名单 + 严格参数校验。
 - 资源上限：最大深度、最大页面数、超时、重试次数。
+- 生产环境禁止调试模式、开放跨域需白名单控制、敏感配置走环境变量。
 
 ### 2.9 验收标准
 - 可通过网页输入 URL 并创建任务。
@@ -94,6 +105,7 @@
 - 可查看清洗前后数据对照。
 - 可导出 JSON/CSV。
 - 全流程日志可在网页查看。
+- 项目可部署到服务器并由外部用户访问。
 
 ---
 
@@ -105,6 +117,7 @@
 - 调度执行层：任务管理、队列引擎、爬虫 Worker、清洗 Worker。
 - 存储层：任务/队列/原始数据/清洗数据/日志。
 - 实时通道：WebSocket（优先）或 SSE。
+- 部署层：Nginx 反向代理 + 应用进程管理 + 数据库/缓存服务。
 
 ### 3.2 建议技术栈
 - 后端：Python + FastAPI。
@@ -112,6 +125,7 @@
 - 数据库：PostgreSQL（SQLite 仅用于本地原型）。
 - 前端：React + 命令行控制组件。
 - 实时推送：WebSocket。
+- 部署：Linux 云服务器 + systemd/Supervisor + Nginx。
 
 ### 3.3 模块拆分
 - `api-gateway`：鉴权、路由、参数校验。
@@ -189,6 +203,10 @@
 
 ### 3.7 事件类型
 - `task_created`
+- `task_started`
+- `task_resumed`
+- `task_paused`
+- `task_stopped`
 - `queue_enqueued`
 - `crawl_item_success`
 - `crawl_item_failed`
@@ -215,7 +233,7 @@
 - 事件流断开时，3 秒轮询任务状态兜底。
 - 队列面板和结果表需做事件更新与轮询结果一致性对账。
 
-### 3.10 实施排期（2 周）
+### 3.10 实施排期
 - Day 1-2：表结构 + 状态机 + `/submit` + `/tasks`
 - Day 3-4：命令引擎 + `/command`
 - Day 5-6：爬虫 Worker + 队列执行
@@ -224,8 +242,17 @@
 - Day 10：前端联调
 - Day 11：导出 + 审计日志
 - Day 12-14：测试、压测、上线准备
+- Day 15+：服务器部署、域名接入、生产监控、备份与运维
 
-### 3.11 测试方案
+### 3.11 部署要求
+- 开发环境允许 SQLite，本地单进程运行。
+- 预生产/生产环境切换为 PostgreSQL。
+- 若引入 Celery，则需要 Redis 作为 Broker/Result Backend。
+- 使用 Nginx 暴露 80/443，并反向代理到 FastAPI 服务。
+- 使用 `systemd`、`supervisor` 或容器编排保证服务常驻。
+- 配置 HTTPS、日志轮转、跨域策略、环境变量和密钥管理。
+
+### 3.12 测试方案
 - 单元测试：命令解析、状态迁移、清洗规则。
 - 集成测试：提交 -> 抓取 -> 清洗 -> 导出全链路。
 - 安全测试：SSRF、命令注入、限流。
@@ -233,27 +260,14 @@
 
 ---
 
-## 4. 下一步
+## 4. 当前进度确认
 
-当前 README 可作为开发基线。
+截至当前仓库状态，项目已经完成 Day 1-4 的后端原型能力。
 
-建议马上补齐：
-- API 字段字典 v1.0。
-- 核心数据表 SQL DDL 草案。
-- 前端线框图 v1.0（输入区、命令区、队列区、结果区、事件流）。
+### 4.1 已完成
 
-已补齐文档（当前目录）：
-- [API_SPEC.md](./API_SPEC.md)
-- [DATABASE_DDL.sql](./DATABASE_DDL.sql)
-- [WIREFRAME.md](./WIREFRAME.md)
-
----
-
-## 5. Day 1-2 当前实现
-
-当前仓库已经补上一个可运行的本地后端原型，覆盖排期中的 Day 1-2 范围：
-
-- SQLite 表结构初始化（`tasks`、`queue_items`、`event_logs`）
+Day 1-2：
+- SQLite 表结构初始化
 - 任务状态机定义
 - `POST /v1/crawl/submit`
 - `GET /v1/tasks`
@@ -261,22 +275,61 @@
 - `GET /v1/health`
 - URL 基础校验与 SSRF 初步防护
 
-### 5.1 本地启动
+Day 3-4：
+- 命令引擎基础实现
+- `POST /v1/command`
+- 已支持命令：
+  - `help`
+  - `crawl start`
+  - `crawl pause`
+  - `crawl resume`
+  - `crawl stop`
+  - `task status`
+  - `queue list`
+- 命令审计日志 `command_logs`
+- 任务状态迁移事件写入 `event_logs`
+
+### 4.2 当前未完成
+
+- 真正的爬虫 Worker 与队列消费
+- 原始数据落库与清洗管道
+- 结果查询与导出接口
+- 实时事件流（WebSocket/SSE）
+- 前端页面
+- API Key 鉴权
+- 生产部署脚本与配置
+
+### 4.3 当前结论
+
+现在的仓库是“后端控制面原型”，还不是“可被他人访问的网站”。
+
+要达到最终目标，下一阶段必须继续完成：
+1. Day 5-8：抓取执行、清洗去重、结果落库。
+2. Day 9-10：事件流和前端页面。
+3. Day 11-14：导出、鉴权、测试、上线准备。
+4. 部署阶段：Nginx、进程守护、PostgreSQL/Redis、HTTPS、域名与监控。
+
+---
+
+## 5. 本地启动
 
 ```powershell
 & .\myvenv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-启动后默认监听：
+默认监听：
 
 ```text
 http://127.0.0.1:8000
 ```
 
-### 5.2 快速验证
+---
 
-提交任务：
+## 6. 快速验证
+
+### 6.1 提交任务
 
 ```powershell
 Invoke-RestMethod `
@@ -286,34 +339,59 @@ Invoke-RestMethod `
   -Body '{"url":"https://example.com/news","limit":10,"depth":1}'
 ```
 
-查询任务列表：
+### 6.2 查询任务列表
 
 ```powershell
 Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks
 ```
 
-查询单个任务：
+### 6.3 发送命令
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/v1/command `
+  -ContentType "application/json" `
+  -Body '{"command":"crawl start url=https://example.com/news limit=10 depth=1","request_id":"req_manual_001"}'
+```
+
+### 6.4 查询单个任务
 
 ```powershell
 Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks/<task_id>
 ```
 
-### 5.3 当前虚拟环境
+---
 
-项目内的 `myvenv` 已切换为基于官方 CPython 3.10 的干净虚拟环境。
+## 7. 测试
 
-如需重新安装依赖：
+当前已覆盖：
+- Day 1-2 基础用例
+- Day 3-4 命令引擎与 `/v1/command`
+
+执行方式：
 
 ```powershell
-& .\myvenv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m unittest discover -s tests -p "test_day1_day2.py" -v
+python -m unittest discover -s tests -p "test_day3_day4.py" -v
 ```
 
-当前已安装的关键依赖：
+---
 
-- `fastapi`、`uvicorn`：API 服务与本地启动
-- `requests`、`beautifulsoup4`：页面抓取与 HTML 解析
-- `httpx`：接口集成测试与后续服务间调用
-- `celery`、`redis`：后续任务队列与异步执行
-- `psycopg[binary]`：后续 PostgreSQL 接入
-- `websockets`：后续实时事件流能力
+## 8. 后续建议
+
+建议按下面顺序推进，避免先做前端再返工后端协议：
+
+1. 完成 Day 5-6 的进程内队列执行和抓取 Worker。
+2. 完成 Day 7-8 的 `raw_items`、`clean_items`、去重与结果查询。
+3. 补 Day 9 的事件流接口。
+4. 开始 Day 10 的 React 前端页面。
+5. 切换到 PostgreSQL/Redis，准备服务器部署。
+
+---
+
+## 9. 相关文档
+
+- [API_SPEC.md](./API_SPEC.md)
+- [DATABASE_DDL.sql](./DATABASE_DDL.sql)
+- [WIREFRAME.md](./WIREFRAME.md)

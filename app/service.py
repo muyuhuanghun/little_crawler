@@ -9,13 +9,14 @@ from typing import Any
 from app.db import get_connection
 from app.errors import AppError
 from app.security import validate_target_url
-from app.state_machine import TaskStatus
+from app.state_machine import TaskStatus, can_transition
 
 
 DEFAULT_LIMIT = 50
 DEFAULT_DEPTH = 1
 MAX_LIMIT = 1000
 MAX_DEPTH = 5
+QUEUE_STATES = {"pending", "running", "done", "failed", "canceled"}
 
 
 @dataclass(slots=True)
@@ -150,6 +151,120 @@ def get_task(task_id: str) -> dict[str, Any]:
     return _serialize_task(_row_to_task(row))
 
 
+def transition_task(task_id: str, target_status: str) -> dict[str, Any]:
+    task = _get_task_record(task_id)
+
+    if not can_transition(task.status, target_status):
+        raise AppError(2002, f"cannot transition task from {task.status} to {target_status}")
+
+    target = TaskStatus(target_status)
+    now = _now()
+    started_at = task.started_at
+    ended_at = task.ended_at
+    event_type = "task_updated"
+
+    if target == TaskStatus.RUNNING:
+        started_at = task.started_at or now
+        ended_at = None
+        event_type = "task_started" if task.status == TaskStatus.PENDING.value else "task_resumed"
+    elif target == TaskStatus.PAUSED:
+        event_type = "task_paused"
+    elif target == TaskStatus.STOPPED:
+        ended_at = now
+        event_type = "task_stopped"
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = ?, started_at = ?, ended_at = ?
+            WHERE task_id = ?
+            """,
+            (target.value, started_at, ended_at, task_id),
+        )
+        if target == TaskStatus.STOPPED:
+            connection.execute(
+                """
+                UPDATE queue_items
+                SET state = 'canceled', updated_at = ?
+                WHERE task_id = ? AND state IN ('pending', 'running')
+                """,
+                (now, task_id),
+            )
+        _insert_event_log(
+            connection,
+            task_id,
+            event_type,
+            {"from": task.status, "to": target.value},
+            now,
+        )
+
+    return get_task(task_id)
+
+
+def list_queue_items(task_id: str, state: str | None = None) -> dict[str, Any]:
+    _ensure_task_exists(task_id)
+    normalized_state = None
+    if state is not None:
+        normalized_state = state.strip().lower()
+        if normalized_state == "all":
+            normalized_state = None
+        elif normalized_state not in QUEUE_STATES:
+            raise AppError(1001, "state must be one of pending, running, done, failed, canceled, all")
+
+    with get_connection() as connection:
+        if normalized_state is None:
+            rows = connection.execute(
+                """
+                SELECT id, url, state, retry_count, next_run_at, last_error, updated_at
+                FROM queue_items
+                WHERE task_id = ?
+                ORDER BY id ASC
+                """,
+                (task_id,),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT id, url, state, retry_count, next_run_at, last_error, updated_at
+                FROM queue_items
+                WHERE task_id = ? AND state = ?
+                ORDER BY id ASC
+                """,
+                (task_id, normalized_state),
+            ).fetchall()
+
+    items = [
+        {
+            "id": row["id"],
+            "url": row["url"],
+            "state": row["state"],
+            "retry_count": row["retry_count"],
+            "next_run_at": row["next_run_at"],
+            "last_error": row["last_error"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+    return {
+        "task_id": task_id,
+        "state": normalized_state or "all",
+        "total": len(items),
+        "items": items,
+    }
+
+
+def log_command(request_id: str, command: str, result_code: int, result_message: str) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO command_logs (request_id, command, result_code, result_message, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (request_id, command, result_code, result_message, _now()),
+        )
+
+
 def _serialize_task(task: TaskRecord) -> dict[str, Any]:
     data = asdict(task)
     data["limit"] = data.pop("limit")
@@ -172,6 +287,38 @@ def _row_to_task(row: Any) -> TaskRecord:
         created_at=row["created_at"],
         started_at=row["started_at"],
         ended_at=row["ended_at"],
+    )
+
+
+def _get_task_record(task_id: str) -> TaskRecord:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                task_id, task_name, root_url, status, limit_count, depth,
+                total_count, done_count, failed_count, clean_done_count,
+                created_at, started_at, ended_at
+            FROM tasks
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+    if row is None:
+        raise AppError(2001)
+    return _row_to_task(row)
+
+
+def _ensure_task_exists(task_id: str) -> None:
+    _get_task_record(task_id)
+
+
+def _insert_event_log(connection: Any, task_id: str, event_type: str, payload: dict[str, Any], created_at: str) -> None:
+    connection.execute(
+        """
+        INSERT INTO event_logs (task_id, event_type, payload_json, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (task_id, event_type, json.dumps(payload, ensure_ascii=True), created_at),
     )
 
 

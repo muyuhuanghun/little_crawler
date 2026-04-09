@@ -10,9 +10,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.command_engine import execute_command
 from app.db import init_db
 from app.errors import AppError, ERROR_MESSAGES
-from app.service import DEFAULT_DEPTH, DEFAULT_LIMIT, get_task, list_tasks, submit_task
+from app.service import DEFAULT_DEPTH, DEFAULT_LIMIT, get_task, list_tasks, log_command, submit_task
 
 
 HOST = "127.0.0.1"
@@ -26,6 +27,13 @@ class SubmitTaskRequest(BaseModel):
     limit: int = Field(default=DEFAULT_LIMIT, ge=1, le=1000)
     depth: int = Field(default=DEFAULT_DEPTH, ge=1, le=5)
     task_name: str | None = None
+
+
+class CommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(min_length=1)
+    request_id: str | None = None
 
 
 def create_app() -> FastAPI:
@@ -83,6 +91,24 @@ def create_app() -> FastAPI:
     async def crawl_submit(payload: SubmitTaskRequest, request: Request) -> dict[str, Any]:
         data = submit_task(payload.model_dump())
         return _ok_payload(_request_id(request), data, message="task created")
+
+    @api.post("/v1/command")
+    async def command(payload: CommandRequest, request: Request) -> dict[str, Any]:
+        request_id = payload.request_id or _request_id(request)
+        try:
+            data = execute_command(payload.command)
+        except AppError as exc:
+            log_command(request_id, payload.command, exc.code, exc.message)
+            status_code = 400 if exc.code < 5000 else 500
+            if exc.code == 2001:
+                status_code = 404
+            return JSONResponse(
+                status_code=status_code,
+                content=_error_payload(request_id, exc.code, exc.message),
+            )
+
+        log_command(request_id, payload.command, 0, "ok")
+        return _ok_payload(request_id, data)
 
     return api
 

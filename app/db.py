@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS event_logs (
     created_at TEXT NOT NULL,
     FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS command_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    result_code INTEGER NOT NULL,
+    result_message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
