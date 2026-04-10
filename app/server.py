@@ -13,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.command_engine import execute_command
 from app.db import init_db
 from app.errors import AppError, ERROR_MESSAGES
-from app.service import DEFAULT_DEPTH, DEFAULT_LIMIT, get_task, list_tasks, log_command, submit_task
+from app.service import DEFAULT_DEPTH, DEFAULT_LIMIT, get_task, list_queue_items, list_tasks, log_command, submit_task
+from app.worker import get_queue_runner
 
 
 HOST = "127.0.0.1"
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     @api.on_event("startup")
     def on_startup() -> None:
         init_db()
+        get_queue_runner()
 
     @api.exception_handler(AppError)
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
@@ -86,6 +88,10 @@ def create_app() -> FastAPI:
     @api.get("/v1/tasks/{task_id}")
     async def task_detail(task_id: str, request: Request) -> dict[str, Any]:
         return _ok_payload(_request_id(request), get_task(task_id))
+
+    @api.get("/v1/tasks/{task_id}/queue")
+    async def task_queue(task_id: str, request: Request, state: str | None = None) -> dict[str, Any]:
+        return _ok_payload(_request_id(request), list_queue_items(task_id, state))
 
     @api.post("/v1/crawl/submit", status_code=201)
     async def crawl_submit(payload: SubmitTaskRequest, request: Request) -> dict[str, Any]:

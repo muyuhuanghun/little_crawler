@@ -181,7 +181,7 @@
 - `created_at`、`started_at`、`ended_at`
 
 `queue_items`
-- `id`、`task_id`、`url`、`state`、`retry_count`、`priority`
+- `id`、`task_id`、`url`、`state`、`hop_count`、`retry_count`、`priority`
 - `next_run_at`、`last_error`、`created_at`、`updated_at`
 - 唯一键：`(task_id, url)`
 
@@ -262,7 +262,7 @@
 
 ## 4. 当前进度确认
 
-截至当前仓库状态，项目已经完成 Day 1-4 的后端原型能力。
+截至当前仓库状态，项目已经完成 Day 1-6 的后端原型能力。
 
 ### 4.1 已完成
 
@@ -289,9 +289,15 @@ Day 3-4：
 - 命令审计日志 `command_logs`
 - 任务状态迁移事件写入 `event_logs`
 
+Day 5-6：
+- 进程内队列 Worker 已接入
+- `running` 任务会自动消费 `pending` 队列项
+- 抓取成功/失败会更新 `queue_items`、任务计数与 `event_logs`
+- 支持基于页面链接继续入队，受 `limit` 与 `depth` 控制
+- 新增 `GET /v1/tasks/{task_id}/queue`
+
 ### 4.2 当前未完成
 
-- 真正的爬虫 Worker 与队列消费
 - 原始数据落库与清洗管道
 - 结果查询与导出接口
 - 实时事件流（WebSocket/SSE）
@@ -304,7 +310,7 @@ Day 3-4：
 现在的仓库是“后端控制面原型”，还不是“可被他人访问的网站”。
 
 要达到最终目标，下一阶段必须继续完成：
-1. Day 5-8：抓取执行、清洗去重、结果落库。
+1. Day 7-8：清洗去重、结果落库。
 2. Day 9-10：事件流和前端页面。
 3. Day 11-14：导出、鉴权、测试、上线准备。
 4. 部署阶段：Nginx、进程守护、PostgreSQL/Redis、HTTPS、域名与监控。
@@ -368,12 +374,14 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks/<task_id>
 当前已覆盖：
 - Day 1-2 基础用例
 - Day 3-4 命令引擎与 `/v1/command`
+- Day 5-6 队列消费、抓取成功/失败、暂停恢复
 
 执行方式：
 
 ```powershell
 python -m unittest discover -s tests -p "test_day1_day2.py" -v
 python -m unittest discover -s tests -p "test_day3_day4.py" -v
+python -m unittest discover -s tests -p "test_day5_day6.py" -v
 ```
 
 ---
@@ -382,11 +390,10 @@ python -m unittest discover -s tests -p "test_day3_day4.py" -v
 
 建议按下面顺序推进，避免先做前端再返工后端协议：
 
-1. 完成 Day 5-6 的进程内队列执行和抓取 Worker。
-2. 完成 Day 7-8 的 `raw_items`、`clean_items`、去重与结果查询。
-3. 补 Day 9 的事件流接口。
-4. 开始 Day 10 的 React 前端页面。
-5. 切换到 PostgreSQL/Redis，准备服务器部署。
+1. 完成 Day 7-8 的 `raw_items`、`clean_items`、去重与结果查询。
+2. 补 Day 9 的事件流接口。
+3. 开始 Day 10 的 React 前端页面。
+4. 切换到 PostgreSQL/Redis，准备服务器部署。
 
 ---
 

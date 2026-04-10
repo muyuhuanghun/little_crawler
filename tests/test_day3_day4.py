@@ -11,6 +11,7 @@ from app import db
 from app.command_engine import execute_command
 from app.server import create_app
 from app.service import get_task, submit_task
+from app.worker import reset_fetcher, shutdown_queue_runner
 
 
 class DayThreeDayFourTests(unittest.TestCase):
@@ -23,6 +24,8 @@ class DayThreeDayFourTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
+        reset_fetcher()
+        shutdown_queue_runner()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_help_command(self) -> None:

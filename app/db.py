@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS queue_items (
     task_id TEXT NOT NULL,
     url TEXT NOT NULL,
     state TEXT NOT NULL,
+    hop_count INTEGER NOT NULL DEFAULT 0,
     retry_count INTEGER NOT NULL DEFAULT 0,
     priority INTEGER NOT NULL DEFAULT 100,
     next_run_at TEXT,
@@ -70,3 +71,15 @@ def get_connection() -> sqlite3.Connection:
 def init_db() -> None:
     with get_connection() as connection:
         connection.executescript(SCHEMA)
+        _ensure_queue_items_hop_count(connection)
+
+
+def _ensure_queue_items_hop_count(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(queue_items)").fetchall()
+    }
+    if "hop_count" not in columns:
+        connection.execute(
+            "ALTER TABLE queue_items ADD COLUMN hop_count INTEGER NOT NULL DEFAULT 0"
+        )

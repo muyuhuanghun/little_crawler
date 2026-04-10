@@ -81,14 +81,15 @@ def submit_task(payload: dict[str, Any]) -> dict[str, Any]:
         connection.execute(
             """
             INSERT INTO queue_items (
-                task_id, url, state, retry_count, priority, next_run_at,
+                task_id, url, state, hop_count, retry_count, priority, next_run_at,
                 last_error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
                 url,
                 "pending",
+                0,
                 0,
                 100,
                 None,
@@ -108,6 +109,13 @@ def submit_task(payload: dict[str, Any]) -> dict[str, Any]:
                 json.dumps({"root_url": url, "queued_count": 1}, ensure_ascii=True),
                 created_at,
             ),
+        )
+        _insert_event_log(
+            connection,
+            task_id,
+            "queue_enqueued",
+            {"url": url, "hop_count": 0},
+            created_at,
         )
 
     return {
@@ -199,6 +207,11 @@ def transition_task(task_id: str, target_status: str) -> dict[str, Any]:
             now,
         )
 
+    if target == TaskStatus.RUNNING:
+        from app.worker import notify_queue_runner
+
+        notify_queue_runner()
+
     return get_task(task_id)
 
 
@@ -216,7 +229,7 @@ def list_queue_items(task_id: str, state: str | None = None) -> dict[str, Any]:
         if normalized_state is None:
             rows = connection.execute(
                 """
-                SELECT id, url, state, retry_count, next_run_at, last_error, updated_at
+                SELECT id, url, state, hop_count, retry_count, next_run_at, last_error, updated_at
                 FROM queue_items
                 WHERE task_id = ?
                 ORDER BY id ASC
@@ -226,7 +239,7 @@ def list_queue_items(task_id: str, state: str | None = None) -> dict[str, Any]:
         else:
             rows = connection.execute(
                 """
-                SELECT id, url, state, retry_count, next_run_at, last_error, updated_at
+                SELECT id, url, state, hop_count, retry_count, next_run_at, last_error, updated_at
                 FROM queue_items
                 WHERE task_id = ? AND state = ?
                 ORDER BY id ASC
@@ -239,6 +252,7 @@ def list_queue_items(task_id: str, state: str | None = None) -> dict[str, Any]:
             "id": row["id"],
             "url": row["url"],
             "state": row["state"],
+            "hop_count": row["hop_count"],
             "retry_count": row["retry_count"],
             "next_run_at": row["next_run_at"],
             "last_error": row["last_error"],
