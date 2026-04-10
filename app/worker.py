@@ -11,6 +11,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from app.cleaning import RawItem, save_raw_items
 from app.db import get_connection
 from app.state_machine import TaskStatus
 
@@ -24,6 +25,7 @@ class CrawlResult:
     discovered_urls: list[str]
     status_code: int
     page_title: str | None = None
+    raw_items: list[RawItem] | None = None
 
 
 FetchFunction = Callable[[str], CrawlResult]
@@ -47,7 +49,22 @@ def default_fetch_url(url: str) -> CrawlResult:
             links.append(absolute_url)
 
     title = soup.title.get_text(strip=True) if soup.title else None
-    return CrawlResult(discovered_urls=links, status_code=response.status_code, page_title=title)
+    text_blocks = [paragraph.get_text(" ", strip=True) for paragraph in soup.find_all("p")]
+    content = " ".join(block for block in text_blocks if block).strip() or None
+    raw_item = RawItem(
+        news_id=url,
+        news_date=None,
+        news_title=title,
+        news_content=content,
+        source_url=url,
+        raw_payload={"url": url, "title": title, "status_code": response.status_code},
+    )
+    return CrawlResult(
+        discovered_urls=links,
+        status_code=response.status_code,
+        page_title=title,
+        raw_items=[raw_item],
+    )
 
 
 _fetch_url: FetchFunction = default_fetch_url
@@ -175,6 +192,7 @@ class QueueRunner:
                 """,
                 (task_id,),
             )
+            raw_saved_count = save_raw_items(task_id, result.raw_items or [], now, connection=connection)
             _insert_event(
                 connection,
                 task_id,
@@ -183,6 +201,7 @@ class QueueRunner:
                     "url": url,
                     "status_code": result.status_code,
                     "page_title": result.page_title,
+                    "raw_saved_count": raw_saved_count,
                 },
                 now,
             )

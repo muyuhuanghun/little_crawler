@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.cleaning import list_results
 from app.command_engine import execute_command
 from app.db import init_db
 from app.errors import AppError, ERROR_MESSAGES
@@ -92,6 +93,20 @@ def create_app() -> FastAPI:
     @api.get("/v1/tasks/{task_id}/queue")
     async def task_queue(task_id: str, request: Request, state: str | None = None) -> dict[str, Any]:
         return _ok_payload(_request_id(request), list_queue_items(task_id, state))
+
+    @api.get("/v1/tasks/{task_id}/results")
+    async def task_results(
+        task_id: str,
+        request: Request,
+        view: str = "clean",
+        page: int = 1,
+        page_size: int = 20,
+        q: str | None = None,
+    ) -> dict[str, Any]:
+        return _ok_payload(
+            _request_id(request),
+            list_results(task_id=task_id, view=view, page=page, page_size=page_size, query=q),
+        )
 
     @api.post("/v1/crawl/submit", status_code=201)
     async def crawl_submit(payload: SubmitTaskRequest, request: Request) -> dict[str, Any]:

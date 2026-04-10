@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 from typing import Any
 
+from app.cleaning import run_cleaning
 from app.errors import AppError
 from app.service import (
     DEFAULT_DEPTH,
@@ -36,6 +37,8 @@ def execute_command(command: str) -> dict[str, Any]:
         return _handle_task_status(params)
     if head == ("queue", "list"):
         return _handle_queue_list(params)
+    if head == ("clean", "run"):
+        return _handle_clean_run(params)
 
     raise AppError(1003)
 
@@ -90,6 +93,18 @@ def _handle_queue_list(params: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _handle_clean_run(params: dict[str, str]) -> dict[str, Any]:
+    task_id = _require_param(params, "task_id")
+    result = run_cleaning(task_id)
+    return {
+        "output": (
+            f"clean finished: {task_id} raw_total={result['raw_total']} "
+            f"clean_done={result['clean_done_count']} clean_failed={result['clean_failed_count']}"
+        ),
+        "task_id": task_id,
+    }
+
+
 def _parse_params(tokens: list[str]) -> dict[str, str]:
     params: dict[str, str] = {}
     for token in tokens:
@@ -116,5 +131,6 @@ def _help_text() -> str:
         "supported commands: help | "
         "crawl start url=<...> limit=<1-1000> depth=<1-5> [task_name=<...>] | "
         "crawl pause task_id=<...> | crawl resume task_id=<...> | crawl stop task_id=<...> | "
-        "task status task_id=<...> | queue list task_id=<...> [state=<pending|running|done|failed|canceled|all>]"
+        "task status task_id=<...> | queue list task_id=<...> [state=<pending|running|done|failed|canceled|all>] | "
+        "clean run task_id=<...>"
     )

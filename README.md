@@ -262,7 +262,7 @@
 
 ## 4. 当前进度确认
 
-截至当前仓库状态，项目已经完成 Day 1-6 的后端原型能力。
+截至当前仓库状态，项目已经完成 Day 1-8 的后端原型能力。
 
 ### 4.1 已完成
 
@@ -296,12 +296,18 @@ Day 5-6：
 - 支持基于页面链接继续入队，受 `limit` 与 `depth` 控制
 - 新增 `GET /v1/tasks/{task_id}/queue`
 
+Day 7-8：
+- 抓取结果会落到 `raw_items`
+- 已支持 `clean run task_id=<...>` 清洗命令
+- 清洗阶段会规范化标题、内容、日期，并按 `news_id` / `title+date` 去重
+- 已支持 `GET /v1/tasks/{task_id}/results?view=raw|clean`
+- 任务详情中的 `clean_done_count` 会随清洗结果更新
+
 ### 4.2 当前未完成
 
-- 原始数据落库与清洗管道
-- 结果查询与导出接口
 - 实时事件流（WebSocket/SSE）
 - 前端页面
+- 导出接口
 - API Key 鉴权
 - 生产部署脚本与配置
 
@@ -310,10 +316,9 @@ Day 5-6：
 现在的仓库是“后端控制面原型”，还不是“可被他人访问的网站”。
 
 要达到最终目标，下一阶段必须继续完成：
-1. Day 7-8：清洗去重、结果落库。
-2. Day 9-10：事件流和前端页面。
-3. Day 11-14：导出、鉴权、测试、上线准备。
-4. 部署阶段：Nginx、进程守护、PostgreSQL/Redis、HTTPS、域名与监控。
+1. Day 9-10：事件流和前端页面。
+2. Day 11-14：导出、鉴权、测试、上线准备。
+3. 部署阶段：Nginx、进程守护、PostgreSQL/Redis、HTTPS、域名与监控。
 
 ---
 
@@ -375,6 +380,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks/<task_id>
 - Day 1-2 基础用例
 - Day 3-4 命令引擎与 `/v1/command`
 - Day 5-6 队列消费、抓取成功/失败、暂停恢复
+- Day 7-8 原始结果落库、清洗去重、结果查询
 
 执行方式：
 
@@ -382,6 +388,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks/<task_id>
 python -m unittest discover -s tests -p "test_day1_day2.py" -v
 python -m unittest discover -s tests -p "test_day3_day4.py" -v
 python -m unittest discover -s tests -p "test_day5_day6.py" -v
+python -m unittest discover -s tests -p "test_day7_day8.py" -v
 ```
 
 ---
@@ -390,9 +397,9 @@ python -m unittest discover -s tests -p "test_day5_day6.py" -v
 
 建议按下面顺序推进，避免先做前端再返工后端协议：
 
-1. 完成 Day 7-8 的 `raw_items`、`clean_items`、去重与结果查询。
-2. 补 Day 9 的事件流接口。
-3. 开始 Day 10 的 React 前端页面。
+1. 补 Day 9 的事件流接口。
+2. 开始 Day 10 的 React 前端页面。
+3. 完成导出接口与鉴权。
 4. 切换到 PostgreSQL/Redis，准备服务器部署。
 
 ---

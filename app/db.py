@@ -57,6 +57,34 @@ CREATE TABLE IF NOT EXISTS command_logs (
     result_message TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS raw_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    news_id TEXT,
+    news_date TEXT,
+    news_title TEXT,
+    news_content TEXT,
+    source_url TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    raw_payload_json TEXT,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS clean_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_id INTEGER NOT NULL,
+    task_id TEXT NOT NULL,
+    clean_news_date TEXT,
+    clean_news_title TEXT,
+    clean_news_content TEXT,
+    dedup_key TEXT NOT NULL,
+    clean_status TEXT NOT NULL,
+    cleaned_at TEXT NOT NULL,
+    UNIQUE(task_id, dedup_key),
+    FOREIGN KEY(raw_id) REFERENCES raw_items(id) ON DELETE CASCADE,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+);
 """
 
 
@@ -72,6 +100,7 @@ def init_db() -> None:
     with get_connection() as connection:
         connection.executescript(SCHEMA)
         _ensure_queue_items_hop_count(connection)
+        _ensure_results_tables(connection)
 
 
 def _ensure_queue_items_hop_count(connection: sqlite3.Connection) -> None:
@@ -82,4 +111,49 @@ def _ensure_queue_items_hop_count(connection: sqlite3.Connection) -> None:
     if "hop_count" not in columns:
         connection.execute(
             "ALTER TABLE queue_items ADD COLUMN hop_count INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _ensure_results_tables(connection: sqlite3.Connection) -> None:
+    tables = {
+        row["name"]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "raw_items" not in tables:
+        connection.execute(
+            """
+            CREATE TABLE raw_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                news_id TEXT,
+                news_date TEXT,
+                news_title TEXT,
+                news_content TEXT,
+                source_url TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                raw_payload_json TEXT,
+                FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+            )
+            """
+        )
+    if "clean_items" not in tables:
+        connection.execute(
+            """
+            CREATE TABLE clean_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_id INTEGER NOT NULL,
+                task_id TEXT NOT NULL,
+                clean_news_date TEXT,
+                clean_news_title TEXT,
+                clean_news_content TEXT,
+                dedup_key TEXT NOT NULL,
+                clean_status TEXT NOT NULL,
+                cleaned_at TEXT NOT NULL,
+                UNIQUE(task_id, dedup_key),
+                FOREIGN KEY(raw_id) REFERENCES raw_items(id) ON DELETE CASCADE,
+                FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+            )
+            """
         )
