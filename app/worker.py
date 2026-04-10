@@ -13,6 +13,8 @@ from bs4 import BeautifulSoup
 
 from app.cleaning import RawItem, save_raw_items
 from app.db import get_connection
+from app.errors import AppError
+from app.security import assert_public_network_target, validate_target_url
 from app.state_machine import TaskStatus
 
 
@@ -32,6 +34,7 @@ FetchFunction = Callable[[str], CrawlResult]
 
 
 def default_fetch_url(url: str) -> CrawlResult:
+    assert_public_network_target(url)
     response = requests.get(
         url,
         headers={"User-Agent": "PyMSBot/0.1"},
@@ -283,6 +286,10 @@ class QueueRunner:
         for discovered_url in discovered_urls:
             if queued_total >= limit_count:
                 break
+            try:
+                validate_target_url(discovered_url)
+            except AppError:
+                continue
 
             inserted = connection.execute(
                 """

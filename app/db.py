@@ -93,14 +93,15 @@ def get_connection() -> sqlite3.Connection:
     connection = sqlite3.connect(str(DB_PATH))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.executescript(SCHEMA)
+    _ensure_queue_items_hop_count(connection)
+    _ensure_results_tables(connection)
     return connection
 
 
 def init_db() -> None:
     with get_connection() as connection:
-        connection.executescript(SCHEMA)
-        _ensure_queue_items_hop_count(connection)
-        _ensure_results_tables(connection)
+        pass
 
 
 def _ensure_queue_items_hop_count(connection: sqlite3.Connection) -> None:

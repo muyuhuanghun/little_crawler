@@ -17,6 +17,7 @@ DEFAULT_DEPTH = 1
 MAX_LIMIT = 1000
 MAX_DEPTH = 5
 QUEUE_STATES = {"pending", "running", "done", "failed", "canceled"}
+TERMINAL_EVENT_TYPES = {"task_finished", "task_stopped"}
 
 
 @dataclass(slots=True)
@@ -277,6 +278,35 @@ def log_command(request_id: str, command: str, result_code: int, result_message:
             """,
             (request_id, command, result_code, result_message, _now()),
         )
+
+
+def list_event_logs(task_id: str, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    _ensure_task_exists(task_id)
+    normalized_after_id = _normalize_int(after_id, "after_id", 0, 1_000_000_000)
+    normalized_limit = _normalize_int(limit, "limit", 1, 1000)
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, event_type, payload_json, created_at
+            FROM event_logs
+            WHERE task_id = ? AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (task_id, normalized_after_id, normalized_limit),
+        ).fetchall()
+
+    return [
+        {
+            "id": row["id"],
+            "task_id": task_id,
+            "event_type": row["event_type"],
+            "timestamp": row["created_at"],
+            "payload": json.loads(row["payload_json"]),
+        }
+        for row in rows
+    ]
 
 
 def _serialize_task(task: TaskRecord) -> dict[str, Any]:

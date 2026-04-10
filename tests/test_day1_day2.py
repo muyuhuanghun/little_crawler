@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+from unittest import mock
 import unittest
 from pathlib import Path
 import shutil
@@ -7,16 +9,16 @@ import uuid
 
 from app import db
 from app.errors import AppError
-from app.security import validate_target_url
+from app.security import assert_public_network_target, validate_target_url
 from app.service import get_task, list_tasks, submit_task
 from app.state_machine import can_transition
 
 
 class DayOneDayTwoTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = Path("tests/.tmp")
+        self.temp_dir = Path("tests/.tmp") / uuid.uuid4().hex
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        db.DB_PATH = self.temp_dir / f"{uuid.uuid4().hex}.db"
+        db.DB_PATH = self.temp_dir / "app.db"
         db.init_db()
 
     def tearDown(self) -> None:
@@ -30,6 +32,12 @@ class DayOneDayTwoTests(unittest.TestCase):
     def test_validate_forbids_private_targets(self) -> None:
         with self.assertRaises(AppError) as context:
             validate_target_url("http://127.0.0.1/admin")
+        self.assertEqual(context.exception.code, 1002)
+
+    def test_resolved_private_host_is_forbidden(self) -> None:
+        with mock.patch("app.security.socket.getaddrinfo", return_value=[(socket.AF_INET, 0, 0, "", ("127.0.0.1", 0))]):
+            with self.assertRaises(AppError) as context:
+                assert_public_network_target("https://example.com/news")
         self.assertEqual(context.exception.code, 1002)
 
     def test_submit_task_initializes_queue_and_detail(self) -> None:

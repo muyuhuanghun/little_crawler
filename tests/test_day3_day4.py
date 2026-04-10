@@ -11,14 +11,14 @@ from app import db
 from app.command_engine import execute_command
 from app.server import create_app
 from app.service import get_task, submit_task
-from app.worker import reset_fetcher, shutdown_queue_runner
+from app.worker import CrawlResult, reset_fetcher, set_fetcher, shutdown_queue_runner
 
 
 class DayThreeDayFourTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = Path("tests/.tmp")
+        self.temp_dir = Path("tests/.tmp") / uuid.uuid4().hex
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        db.DB_PATH = self.temp_dir / f"{uuid.uuid4().hex}.db"
+        db.DB_PATH = self.temp_dir / "app.db"
         self.client = TestClient(create_app())
         db.init_db()
 
@@ -35,10 +35,11 @@ class DayThreeDayFourTests(unittest.TestCase):
         self.assertIsNone(result["task_id"])
 
     def test_crawl_start_creates_running_task(self) -> None:
+        set_fetcher(lambda url: CrawlResult(discovered_urls=[], status_code=200, page_title=url))
         result = execute_command("crawl start url=https://example.com/news limit=10 depth=2 task_name=daily")
 
         task = get_task(result["task_id"])
-        self.assertEqual(task["status"], "running")
+        self.assertIn(task["status"], {"running", "success"})
         self.assertIsNotNone(task["started_at"])
         self.assertEqual(task["task_name"], "daily")
 

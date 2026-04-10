@@ -15,9 +15,9 @@ from app.worker import CrawlResult, reset_fetcher, set_fetcher, shutdown_queue_r
 
 class DayFiveDaySixTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = Path("tests/.tmp")
+        self.temp_dir = Path("tests/.tmp") / uuid.uuid4().hex
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        db.DB_PATH = self.temp_dir / f"{uuid.uuid4().hex}.db"
+        db.DB_PATH = self.temp_dir / "app.db"
         db.init_db()
 
     def tearDown(self) -> None:

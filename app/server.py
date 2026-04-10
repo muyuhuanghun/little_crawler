@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 import uuid
@@ -7,19 +10,30 @@ import uuid
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.cleaning import list_results
 from app.command_engine import execute_command
 from app.db import init_db
 from app.errors import AppError, ERROR_MESSAGES
-from app.service import DEFAULT_DEPTH, DEFAULT_LIMIT, get_task, list_queue_items, list_tasks, log_command, submit_task
+from app.service import (
+    DEFAULT_DEPTH,
+    DEFAULT_LIMIT,
+    get_task,
+    list_event_logs,
+    list_queue_items,
+    list_tasks,
+    log_command,
+    submit_task,
+)
 from app.worker import get_queue_runner
 
 
 HOST = "127.0.0.1"
 PORT = 8000
+EVENT_STREAM_POLL_INTERVAL_SECONDS = 0.1
+EVENT_STREAM_IDLE_TIMEOUT_SECONDS = 5
 
 
 class SubmitTaskRequest(BaseModel):
@@ -38,13 +52,15 @@ class CommandRequest(BaseModel):
     request_id: str | None = None
 
 
-def create_app() -> FastAPI:
-    api = FastAPI(title="PyMS Control Plane", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> Any:
+    init_db()
+    get_queue_runner()
+    yield
 
-    @api.on_event("startup")
-    def on_startup() -> None:
-        init_db()
-        get_queue_runner()
+
+def create_app() -> FastAPI:
+    api = FastAPI(title="PyMS Control Plane", version="0.1.0", lifespan=_lifespan)
 
     @api.exception_handler(AppError)
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
@@ -108,6 +124,51 @@ def create_app() -> FastAPI:
             list_results(task_id=task_id, view=view, page=page, page_size=page_size, query=q),
         )
 
+    @api.get("/v1/events/stream")
+    async def event_stream(
+        task_id: str,
+        request: Request,
+        after_id: int = 0,
+    ) -> StreamingResponse:
+        get_task(task_id)
+
+        async def generate() -> Any:
+            last_id = after_id
+            idle_started_at = asyncio.get_running_loop().time()
+
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    events = list_event_logs(task_id=task_id, after_id=last_id, limit=100)
+                except AppError as exc:
+                    if exc.code == 2001:
+                        return
+                    raise
+                if events:
+                    idle_started_at = asyncio.get_running_loop().time()
+                    for event in events:
+                        last_id = event["id"]
+                        yield _sse_frame("message", event, event_id=event["id"])
+                else:
+                    try:
+                        current_task = get_task(task_id)
+                    except AppError as exc:
+                        if exc.code == 2001:
+                            return
+                        raise
+                    idle_seconds = asyncio.get_running_loop().time() - idle_started_at
+                    if current_task["status"] in {"success", "failed", "stopped"} and idle_seconds >= 0.2:
+                        return
+                    if idle_seconds >= EVENT_STREAM_IDLE_TIMEOUT_SECONDS:
+                        yield _sse_frame("keepalive", {"task_id": task_id, "message": "idle timeout"})
+                        return
+                    yield ": keepalive\n\n"
+                    await asyncio.sleep(EVENT_STREAM_POLL_INTERVAL_SECONDS)
+
+        return StreamingResponse(generate(), media_type="text/event-stream")
+
     @api.post("/v1/crawl/submit", status_code=201)
     async def crawl_submit(payload: SubmitTaskRequest, request: Request) -> dict[str, Any]:
         data = submit_task(payload.model_dump())
@@ -163,3 +224,12 @@ def _error_payload(request_id: str, code: int, message: str) -> dict[str, Any]:
         "request_id": request_id,
         "data": None,
     }
+
+
+def _sse_frame(event: str, data: dict[str, Any], event_id: int | None = None) -> str:
+    lines: list[str] = []
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event}")
+    lines.append(f"data: {json.dumps(data, ensure_ascii=True)}")
+    return "\n".join(lines) + "\n\n"

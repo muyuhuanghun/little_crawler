@@ -28,12 +28,17 @@ def validate_target_url(url: str) -> str:
         ip = ipaddress.ip_address(hostname)
         _assert_public_ip(ip)
     except ValueError:
-        _assert_public_hostname(hostname)
+        _assert_hostname(hostname)
 
     return url
 
 
-def _assert_public_hostname(hostname: str) -> None:
+def assert_public_network_target(url: str) -> str:
+    parsed = urlparse(validate_target_url(url))
+    hostname = parsed.hostname
+    if not hostname:
+        raise AppError(1002, "url host is required")
+
     try:
         infos = socket.getaddrinfo(hostname, None)
     except socket.gaierror as exc:
@@ -44,8 +49,26 @@ def _assert_public_hostname(hostname: str) -> None:
 
     for info in infos:
         raw_ip = info[4][0]
-        ip = ipaddress.ip_address(raw_ip)
-        _assert_public_ip(ip)
+        _assert_public_ip(ipaddress.ip_address(raw_ip))
+
+    return url
+
+
+def _assert_hostname(hostname: str) -> None:
+    # Avoid environment-dependent DNS resolution here. Validation blocks unsafe
+    # literal IPs and obviously local hostnames; real fetches can fail later.
+    if "." not in hostname:
+        raise AppError(1002, "url host is invalid")
+    labels = hostname.split(".")
+    if any(not label or len(label) > 63 for label in labels):
+        raise AppError(1002, "url host is invalid")
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789-")
+    for label in labels:
+        lowered = label.lower()
+        if lowered.startswith("-") or lowered.endswith("-"):
+            raise AppError(1002, "url host is invalid")
+        if any(char not in allowed for char in lowered):
+            raise AppError(1002, "url host is invalid")
 
 
 def _assert_public_ip(ip: ipaddress._BaseAddress) -> None:

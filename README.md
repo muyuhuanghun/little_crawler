@@ -262,7 +262,7 @@
 
 ## 4. 当前进度确认
 
-截至当前仓库状态，项目已经完成 Day 1-8 的后端原型能力。
+截至当前仓库状态，项目已经完成 Day 1-9 的后端原型能力。
 
 ### 4.1 已完成
 
@@ -303,9 +303,14 @@ Day 7-8：
 - 已支持 `GET /v1/tasks/{task_id}/results?view=raw|clean`
 - 任务详情中的 `clean_done_count` 会随清洗结果更新
 
+Day 9：
+- 已支持 `GET /v1/events/stream?task_id=...&after_id=...`
+- 事件流采用 SSE，支持历史事件回放与 `after_id` 增量续传
+- 任务结束后会短暂等待尾部事件，再自动关闭流
+- 不存在的 `task_id` 会返回标准 `404` 错误载荷
+
 ### 4.2 当前未完成
 
-- 实时事件流（WebSocket/SSE）
 - 前端页面
 - 导出接口
 - API Key 鉴权
@@ -316,7 +321,7 @@ Day 7-8：
 现在的仓库是“后端控制面原型”，还不是“可被他人访问的网站”。
 
 要达到最终目标，下一阶段必须继续完成：
-1. Day 9-10：事件流和前端页面。
+1. Day 10：前端页面。
 2. Day 11-14：导出、鉴权、测试、上线准备。
 3. 部署阶段：Nginx、进程守护、PostgreSQL/Redis、HTTPS、域名与监控。
 
@@ -372,6 +377,14 @@ Invoke-RestMethod `
 Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks/<task_id>
 ```
 
+### 6.5 订阅事件流
+
+```powershell
+Invoke-WebRequest `
+  -Uri "http://127.0.0.1:8000/v1/events/stream?task_id=<task_id>&after_id=0" `
+  -Headers @{Accept="text/event-stream"}
+```
+
 ---
 
 ## 7. 测试
@@ -381,6 +394,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks/<task_id>
 - Day 3-4 命令引擎与 `/v1/command`
 - Day 5-6 队列消费、抓取成功/失败、暂停恢复
 - Day 7-8 原始结果落库、清洗去重、结果查询
+- Day 9 事件流回放、`after_id` 增量订阅、未知任务错误返回
 
 执行方式：
 
@@ -389,6 +403,8 @@ python -m unittest discover -s tests -p "test_day1_day2.py" -v
 python -m unittest discover -s tests -p "test_day3_day4.py" -v
 python -m unittest discover -s tests -p "test_day5_day6.py" -v
 python -m unittest discover -s tests -p "test_day7_day8.py" -v
+python -m unittest discover -s tests -p "test_day9.py" -v
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
 ---
@@ -397,10 +413,9 @@ python -m unittest discover -s tests -p "test_day7_day8.py" -v
 
 建议按下面顺序推进，避免先做前端再返工后端协议：
 
-1. 补 Day 9 的事件流接口。
-2. 开始 Day 10 的 React 前端页面。
-3. 完成导出接口与鉴权。
-4. 切换到 PostgreSQL/Redis，准备服务器部署。
+1. 开始 Day 10 的 React 前端页面。
+2. 完成导出接口与鉴权。
+3. 切换到 PostgreSQL/Redis，准备服务器部署。
 
 ---
 
