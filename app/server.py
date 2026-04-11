@@ -31,6 +31,7 @@ from app.service import (
     submit_task,
 )
 from app.worker import get_queue_runner
+from app.wordclouds import generate_wordcloud
 
 
 HOST = "127.0.0.1"
@@ -47,6 +48,7 @@ class SubmitTaskRequest(BaseModel):
     limit: int = Field(default=DEFAULT_LIMIT, ge=1, le=1000)
     depth: int = Field(default=DEFAULT_DEPTH, ge=1, le=5)
     task_name: str | None = None
+    renderer: str = Field(default="http", min_length=1)
 
 
 class CommandRequest(BaseModel):
@@ -60,6 +62,15 @@ class ExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     format: str = Field(min_length=1)
+
+
+class WordCloudRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    view: str = Field(default="auto", min_length=1)
+    width: int = Field(default=1200, ge=320, le=2000)
+    height: int = Field(default=720, ge=320, le=2000)
+    top_n: int = Field(default=80, ge=10, le=200)
 
 
 @asynccontextmanager
@@ -148,6 +159,26 @@ def create_app() -> FastAPI:
         return StreamingResponse(
             BytesIO(exported["content"]),
             media_type=exported["media_type"],
+            headers=headers,
+        )
+
+    @api.post("/v1/tasks/{task_id}/wordcloud")
+    async def task_wordcloud(task_id: str, payload: WordCloudRequest) -> StreamingResponse:
+        generated = generate_wordcloud(
+            task_id=task_id,
+            view=payload.view,
+            width=payload.width,
+            height=payload.height,
+            top_n=payload.top_n,
+        )
+        headers = {
+            "Content-Disposition": f'inline; filename="{generated["filename"]}"',
+            "X-Wordcloud-View": generated["view"],
+            "X-Wordcloud-Top-Terms": json.dumps(generated["top_terms"], ensure_ascii=True),
+        }
+        return StreamingResponse(
+            BytesIO(generated["content"]),
+            media_type=generated["media_type"],
             headers=headers,
         )
 

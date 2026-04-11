@@ -319,12 +319,19 @@ Day 11：
 - 可将 `clean_items` 同步导出为 `JSON` 或 `CSV` 附件
 - 已补充导出接口与静态页面路由测试
 
+Day 12-13：
+- 已支持中文站点编码识别修复
+- 已支持词云图生成接口与前端预览
+- 已支持 `renderer=http|browser` 的任务级抓取模式
+- `browser` 模式基于 Playwright 做动态页面渲染，不包含 `stealth.js` 或规避检测逻辑
+
 ### 4.2 当前未完成
 
 - API Key 鉴权
 - 生产部署脚本与配置
 - PostgreSQL / Redis 生产化切换
 - 更完整的前端看板能力（队列分栏、结果表分页、鉴权态）
+- Playwright 运行依赖的安装引导与运行期环境探测优化
 
 ### 4.3 当前结论
 
@@ -343,6 +350,12 @@ Day 11：
 & .\myvenv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 python main.py
+```
+
+如果要使用动态页面渲染模式，还需要额外安装 Playwright 浏览器：
+
+```powershell
+python -m playwright install chromium
 ```
 
 默认监听：
@@ -368,7 +381,7 @@ Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:8000/v1/crawl/submit `
   -ContentType "application/json" `
-  -Body '{"url":"https://example.com/news","limit":10,"depth":1}'
+  -Body '{"url":"https://example.com/news","limit":10,"depth":1,"renderer":"http"}'
 ```
 
 ### 6.2 查询任务列表
@@ -384,7 +397,7 @@ Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:8000/v1/command `
   -ContentType "application/json" `
-  -Body '{"command":"crawl start url=https://example.com/news limit=10 depth=1","request_id":"req_manual_001"}'
+  -Body '{"command":"crawl start url=https://example.com/news limit=10 depth=1 renderer=browser","request_id":"req_manual_001"}'
 ```
 
 ### 6.4 查询单个任务
@@ -420,6 +433,17 @@ Invoke-WebRequest `
 http://127.0.0.1:8000/
 ```
 
+### 6.8 生成词云图
+
+```powershell
+Invoke-WebRequest `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/v1/tasks/<task_id>/wordcloud `
+  -ContentType "application/json" `
+  -Body '{"view":"auto","width":1200,"height":720,"top_n":80}' `
+  -OutFile .\task_wordcloud.png
+```
+
 ---
 
 ## 7. 测试
@@ -432,6 +456,9 @@ http://127.0.0.1:8000/
 - Day 9 事件流回放、`after_id` 增量订阅、未知任务错误返回
 - Day 10 导出接口成功/失败路径
 - Day 11 首页与静态资源可访问性
+- Day 12 中文编码识别修复
+- Day 13 词云图接口与回退逻辑
+- Day 14 `renderer=browser` 任务配置与 worker 分发
 
 执行方式：
 
@@ -443,6 +470,8 @@ python -m unittest discover -s tests -p "test_day7_day8.py" -v
 python -m unittest discover -s tests -p "test_day9.py" -v
 python -m unittest discover -s tests -p "test_day10.py" -v
 python -m unittest discover -s tests -p "test_day11.py" -v
+python -m unittest discover -s tests -p "test_day12.py" -v
+python -m unittest discover -s tests -p "test_day13.py" -v
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 

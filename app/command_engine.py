@@ -51,11 +51,16 @@ def _handle_crawl_start(params: dict[str, str]) -> dict[str, Any]:
     }
     if "task_name" in params:
         payload["task_name"] = params["task_name"]
+    if "renderer" in params:
+        payload["renderer"] = params["renderer"]
 
     created = submit_task(payload)
     task = transition_task(created["task_id"], "running")
     return {
-        "output": f"task started: {task['task_id']} url={task['root_url']} status={task['status']}",
+        "output": (
+            f"task started: {task['task_id']} url={task['root_url']} "
+            f"renderer={task['fetch_mode']} status={task['status']}"
+        ),
         "task_id": task["task_id"],
     }
 
@@ -129,7 +134,7 @@ def _require_param(params: dict[str, str], name: str) -> str:
 def _help_text() -> str:
     return (
         "supported commands: help | "
-        "crawl start url=<...> limit=<1-1000> depth=<1-5> [task_name=<...>] | "
+        "crawl start url=<...> limit=<1-1000> depth=<1-5> [task_name=<...>] [renderer=<http|browser>] | "
         "crawl pause task_id=<...> | crawl resume task_id=<...> | crawl stop task_id=<...> | "
         "task status task_id=<...> | queue list task_id=<...> [state=<pending|running|done|failed|canceled|all>] | "
         "clean run task_id=<...>"

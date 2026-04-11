@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -20,6 +22,18 @@ from app.state_machine import TaskStatus
 
 POLL_INTERVAL_SECONDS = 0.05
 REQUEST_TIMEOUT_SECONDS = 10
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
+    "Cache-Control": "no-cache",
+}
+ENCODING_CANDIDATES = ("utf-8", "gb18030", "gbk", "gb2312", "big5")
 
 
 @dataclass(slots=True)
@@ -35,14 +49,70 @@ FetchFunction = Callable[[str], CrawlResult]
 
 def default_fetch_url(url: str) -> CrawlResult:
     assert_public_network_target(url)
-    response = requests.get(
-        url,
-        headers={"User-Agent": "PyMSBot/0.1"},
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
+    session = requests.Session()
+    response = session.get(url, headers=DEFAULT_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    html_text, resolved_encoding = _decode_response(response)
+    return _build_crawl_result(
+        url=url,
+        html_text=html_text,
+        status_code=response.status_code,
+        raw_payload_extra={
+            "resolved_encoding": resolved_encoding,
+            "content_type": response.headers.get("Content-Type"),
+            "fetch_mode": "http",
+        },
+    )
+
+
+def browser_fetch_url(url: str) -> CrawlResult:
+    assert_public_network_target(url)
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise RuntimeError("Playwright is not installed; install playwright and browser binaries first") from exc
+
+    async def _run() -> CrawlResult:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            try:
+                context = await browser.new_context(
+                    user_agent=DEFAULT_HEADERS["User-Agent"],
+                    locale="zh-CN",
+                )
+                page = await context.new_page()
+                response = await page.goto(url, wait_until="networkidle", timeout=REQUEST_TIMEOUT_SECONDS * 1000)
+                html_text = await page.content()
+                status_code = response.status if response is not None else 200
+                return _build_crawl_result(
+                    url=url,
+                    html_text=html_text,
+                    status_code=status_code,
+                    raw_payload_extra={
+                        "fetch_mode": "browser",
+                        "renderer": "playwright",
+                    },
+                )
+            finally:
+                await browser.close()
+
+    return asyncio.run(_run())
+
+
+def fetch_url(url: str, fetch_mode: str = "http") -> CrawlResult:
+    if fetch_mode == "browser":
+        return browser_fetch_url(url)
+    return default_fetch_url(url)
+
+
+def _build_crawl_result(
+    url: str,
+    html_text: str,
+    status_code: int,
+    raw_payload_extra: dict[str, object] | None = None,
+) -> CrawlResult:
+    soup = BeautifulSoup(html_text, "html.parser")
     links: list[str] = []
     seen: set[str] = set()
     for anchor in soup.find_all("a", href=True):
@@ -60,17 +130,22 @@ def default_fetch_url(url: str) -> CrawlResult:
         news_title=title,
         news_content=content,
         source_url=url,
-        raw_payload={"url": url, "title": title, "status_code": response.status_code},
+        raw_payload={
+            "url": url,
+            "title": title,
+            "status_code": status_code,
+            **(raw_payload_extra or {}),
+        },
     )
     return CrawlResult(
         discovered_urls=links,
-        status_code=response.status_code,
+        status_code=status_code,
         page_title=title,
         raw_items=[raw_item],
     )
 
 
-_fetch_url: FetchFunction = default_fetch_url
+_fetch_url: Callable[[str, str], CrawlResult] = fetch_url
 _runner: QueueRunner | None = None
 _runner_lock = threading.Lock()
 
@@ -108,7 +183,8 @@ class QueueRunner:
                     q.url,
                     q.hop_count,
                     t.limit_count,
-                    t.depth
+                    t.depth,
+                    t.fetch_mode
                 FROM queue_items q
                 JOIN tasks t ON t.task_id = q.task_id
                 WHERE t.status = ? AND q.state = 'pending'
@@ -134,7 +210,7 @@ class QueueRunner:
                 return True
 
         try:
-            result = _fetch_url(row["url"])
+            result = _fetch_url(row["url"], row["fetch_mode"])
         except Exception as exc:
             self._mark_item_failed(row["task_id"], row["id"], row["url"], str(exc))
             return True
@@ -335,12 +411,12 @@ def notify_queue_runner() -> None:
 
 def set_fetcher(fetcher: FetchFunction) -> None:
     global _fetch_url
-    _fetch_url = fetcher
+    _fetch_url = lambda url, _fetch_mode="http": fetcher(url)
 
 
 def reset_fetcher() -> None:
     global _fetch_url
-    _fetch_url = default_fetch_url
+    _fetch_url = fetch_url
 
 
 def shutdown_queue_runner() -> None:
@@ -416,6 +492,67 @@ def _insert_event(
         """,
         (task_id, event_type, json.dumps(payload, ensure_ascii=True), created_at),
     )
+
+
+def _decode_response(response: requests.Response) -> tuple[str, str]:
+    header_charset = _extract_charset(response.headers.get("Content-Type"))
+    meta_charset = _extract_meta_charset(response.content)
+    apparent_encoding = getattr(response, "apparent_encoding", None)
+    declared_encoding = response.encoding
+
+    candidates: list[str] = []
+    for candidate in (
+        header_charset,
+        meta_charset,
+        declared_encoding,
+        apparent_encoding,
+        *ENCODING_CANDIDATES,
+    ):
+        normalized = _normalize_encoding(candidate)
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    for candidate in candidates:
+        try:
+            return response.content.decode(candidate), candidate
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    fallback = response.encoding or "utf-8"
+    return response.text, fallback
+
+
+def _extract_charset(content_type: str | None) -> str | None:
+    if not content_type:
+        return None
+    match = re.search(r"charset\s*=\s*['\"]?([A-Za-z0-9._-]+)", content_type, re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _extract_meta_charset(content: bytes) -> str | None:
+    head = content[:4096].decode("ascii", errors="ignore")
+    direct_match = re.search(r"<meta[^>]+charset=['\"]?([A-Za-z0-9._-]+)", head, re.IGNORECASE)
+    if direct_match:
+        return direct_match.group(1)
+    http_equiv_match = re.search(
+        r"<meta[^>]+content=['\"][^'\"]*charset=([A-Za-z0-9._-]+)[^'\"]*['\"]",
+        head,
+        re.IGNORECASE,
+    )
+    if http_equiv_match:
+        return http_equiv_match.group(1)
+    return None
+
+
+def _normalize_encoding(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    aliases = {
+        "gb2312": "gb18030",
+        "gbk": "gb18030",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def _now() -> str:

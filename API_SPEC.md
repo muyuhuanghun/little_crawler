@@ -45,12 +45,14 @@
 | limit | integer | 否 | 50 | 最大抓取页面数，建议 1~1000 |
 | depth | integer | 否 | 1 | 最大抓取深度，建议 1~5 |
 | task_name | string | 否 | 自动生成 | 任务名 |
+| renderer | string | 否 | http | `http` 或 `browser` |
 
 响应 `data`：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | task_id | string | 任务唯一标识 |
+| fetch_mode | string | 实际抓取模式，`http` 或 `browser` |
 | status | string | 初始状态，通常 `pending` |
 | queued_count | integer | 已入队 URL 数 |
 
@@ -126,6 +128,7 @@
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | task_id | string | 任务 ID |
+| fetch_mode | string | `http` 或 `browser` |
 | status | string | `pending/running/paused/stopped/success/failed` |
 | progress | number | 进度百分比，0~100 |
 | total_count | integer | 总条数 |
@@ -243,7 +246,36 @@
 
 ---
 
-### 3.7 实时事件流
+### 3.7 词云图
+
+- 方法：`POST /v1/tasks/{task_id}/wordcloud`
+
+请求体：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---|---|---|
+| view | string | 否 | auto | `auto`、`clean`、`raw` |
+| width | integer | 否 | 1200 | 图片宽度，320~2000 |
+| height | integer | 否 | 720 | 图片高度，320~2000 |
+| top_n | integer | 否 | 80 | 参与布局的热词数量，10~200 |
+
+成功响应：
+
+- 返回同步 `PNG` 文件流
+- `Content-Type`：`image/png`
+- `Content-Disposition`：`inline; filename="<task_id>_<view>_wordcloud.png"`
+- 响应头：
+  - `X-Wordcloud-View`：实际使用的数据来源视图
+  - `X-Wordcloud-Top-Terms`：ASCII JSON 编码的高频词摘要
+
+失败响应：
+
+- 仍使用统一 JSON 错误结构
+- 无可用文本时返回 `400 / code=1001`
+
+---
+
+### 3.8 实时事件流
 
 - 方法：`GET /v1/events/stream?task_id=<task_id>`
 - 协议：SSE（`text/event-stream`）
@@ -292,7 +324,7 @@
 
 ---
 
-### 3.8 健康检查
+### 3.9 健康检查
 
 - 方法：`GET /v1/health`
 
@@ -325,9 +357,18 @@
 - Key/Value 分隔：`=`
 - 非法命令处理：返回 `1003`
 - 参数缺失处理：返回 `1001`
+- `crawl start` 当前支持：`renderer=http|browser`
 
 ## 6. 页面入口
 
 - 网页控制台首页：`GET /`
 - 静态资源前缀：`/static/*`
 - 当前前端为 FastAPI 同源挂载的原生静态页面，直接调用本文件中的后端接口
+- 页面任务创建表单已支持选择 `HTTP` 或 `Browser / Playwright` 渲染模式
+
+## 7. 动态渲染说明
+
+- `renderer=browser` 使用 Playwright 的 Chromium 做动态页面渲染
+- 运行前需要安装 Python 包 `playwright` 以及浏览器二进制
+- 常用安装命令：`python -m playwright install chromium`
+- 当前实现不包含 `stealth.js`、指纹伪装或规避检测逻辑

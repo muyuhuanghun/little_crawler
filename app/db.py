@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     task_name TEXT,
     root_url TEXT NOT NULL,
+    fetch_mode TEXT NOT NULL DEFAULT 'http',
     status TEXT NOT NULL,
     limit_count INTEGER NOT NULL,
     depth INTEGER NOT NULL,
@@ -94,6 +95,7 @@ def get_connection() -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.executescript(SCHEMA)
+    _ensure_tasks_fetch_mode(connection)
     _ensure_queue_items_hop_count(connection)
     _ensure_results_tables(connection)
     return connection
@@ -112,6 +114,17 @@ def _ensure_queue_items_hop_count(connection: sqlite3.Connection) -> None:
     if "hop_count" not in columns:
         connection.execute(
             "ALTER TABLE queue_items ADD COLUMN hop_count INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _ensure_tasks_fetch_mode(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
+    }
+    if "fetch_mode" not in columns:
+        connection.execute(
+            "ALTER TABLE tasks ADD COLUMN fetch_mode TEXT NOT NULL DEFAULT 'http'"
         )
 
 

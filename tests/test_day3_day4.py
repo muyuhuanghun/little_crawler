@@ -43,6 +43,17 @@ class DayThreeDayFourTests(unittest.TestCase):
         self.assertIsNotNone(task["started_at"])
         self.assertEqual(task["task_name"], "daily")
 
+    def test_crawl_start_accepts_browser_renderer(self) -> None:
+        set_fetcher(lambda url: CrawlResult(discovered_urls=[], status_code=200, page_title=url))
+
+        result = execute_command(
+            "crawl start url=https://example.com/news limit=10 depth=2 task_name=daily renderer=browser"
+        )
+
+        task = get_task(result["task_id"])
+        self.assertEqual(task["fetch_mode"], "browser")
+        self.assertIn("renderer=browser", result["output"])
+
     def test_pause_resume_stop_commands_change_status(self) -> None:
         created = execute_command("crawl start url=https://example.com/news")
 

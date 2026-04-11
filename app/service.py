@@ -18,6 +18,7 @@ MAX_LIMIT = 1000
 MAX_DEPTH = 5
 QUEUE_STATES = {"pending", "running", "done", "failed", "canceled"}
 TERMINAL_EVENT_TYPES = {"task_finished", "task_stopped"}
+FETCH_MODES = {"http", "browser"}
 
 
 @dataclass(slots=True)
@@ -25,6 +26,7 @@ class TaskRecord:
     task_id: str
     task_name: str | None
     root_url: str
+    fetch_mode: str
     status: str
     limit: int
     depth: int
@@ -50,6 +52,7 @@ def submit_task(payload: dict[str, Any]) -> dict[str, Any]:
     task_name = payload.get("task_name")
     if task_name is not None and not isinstance(task_name, str):
         raise AppError(1001, "task_name must be a string")
+    fetch_mode = _normalize_fetch_mode(payload.get("renderer", payload.get("fetch_mode", "http")))
 
     task_id = f"task_{uuid.uuid4().hex[:12]}"
     created_at = _now()
@@ -58,15 +61,16 @@ def submit_task(payload: dict[str, Any]) -> dict[str, Any]:
         connection.execute(
             """
             INSERT INTO tasks (
-                task_id, task_name, root_url, status, limit_count, depth,
+                task_id, task_name, root_url, fetch_mode, status, limit_count, depth,
                 total_count, done_count, failed_count, clean_done_count,
                 created_at, started_at, ended_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
                 task_name or task_id,
                 url,
+                fetch_mode,
                 TaskStatus.PENDING.value,
                 limit,
                 depth,
@@ -121,6 +125,7 @@ def submit_task(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "task_id": task_id,
+        "fetch_mode": fetch_mode,
         "status": TaskStatus.PENDING.value,
         "queued_count": 1,
     }
@@ -132,6 +137,7 @@ def list_tasks() -> list[dict[str, Any]]:
             """
             SELECT
                 task_id, task_name, root_url, status, limit_count, depth,
+                fetch_mode,
                 total_count, done_count, failed_count, clean_done_count,
                 created_at, started_at, ended_at
             FROM tasks
@@ -147,6 +153,7 @@ def get_task(task_id: str) -> dict[str, Any]:
             """
             SELECT
                 task_id, task_name, root_url, status, limit_count, depth,
+                fetch_mode,
                 total_count, done_count, failed_count, clean_done_count,
                 created_at, started_at, ended_at
             FROM tasks
@@ -321,6 +328,7 @@ def _row_to_task(row: Any) -> TaskRecord:
         task_id=row["task_id"],
         task_name=row["task_name"],
         root_url=row["root_url"],
+        fetch_mode=row["fetch_mode"],
         status=row["status"],
         limit=row["limit_count"],
         depth=row["depth"],
@@ -339,7 +347,7 @@ def _get_task_record(task_id: str) -> TaskRecord:
         row = connection.execute(
             """
             SELECT
-                task_id, task_name, root_url, status, limit_count, depth,
+                task_id, task_name, root_url, fetch_mode, status, limit_count, depth,
                 total_count, done_count, failed_count, clean_done_count,
                 created_at, started_at, ended_at
             FROM tasks
@@ -382,6 +390,15 @@ def _normalize_int(value: Any, field: str, minimum: int, maximum: int) -> int:
         raise AppError(1001, f"{field} must be an integer") from exc
     if normalized < minimum or normalized > maximum:
         raise AppError(1001, f"{field} must be between {minimum} and {maximum}")
+    return normalized
+
+
+def _normalize_fetch_mode(value: Any) -> str:
+    if not isinstance(value, str):
+        raise AppError(1001, "renderer must be one of http, browser")
+    normalized = value.strip().lower()
+    if normalized not in FETCH_MODES:
+        raise AppError(1001, "renderer must be one of http, browser")
     return normalized
 
 

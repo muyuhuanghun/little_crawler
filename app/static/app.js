@@ -1,6 +1,7 @@
 const state = {
   selectedTaskId: null,
   eventSource: null,
+  wordcloudUrl: null,
 };
 
 const elements = {
@@ -17,6 +18,10 @@ const elements = {
   streamStatus: document.getElementById("stream-status"),
   eventsLog: document.getElementById("events-log"),
   exportButtons: Array.from(document.querySelectorAll("[data-format]")),
+  generateWordcloud: document.getElementById("generate-wordcloud"),
+  wordcloudPanel: document.getElementById("wordcloud-panel"),
+  wordcloudImage: document.getElementById("wordcloud-image"),
+  wordcloudMeta: document.getElementById("wordcloud-meta"),
   statTotal: document.getElementById("stat-total"),
   statRunning: document.getElementById("stat-running"),
   statSuccess: document.getElementById("stat-success"),
@@ -28,6 +33,7 @@ function init() {
   elements.commandForm.addEventListener("submit", onCommandRun);
   elements.quickButtons.forEach((button) => button.addEventListener("click", onQuickCommand));
   elements.exportButtons.forEach((button) => button.addEventListener("click", onExport));
+  elements.generateWordcloud.addEventListener("click", onGenerateWordcloud);
   void loadTasks();
 }
 
@@ -38,6 +44,7 @@ async function onSubmitTask(event) {
     url: String(formData.get("url") || "").trim(),
     limit: Number(formData.get("limit") || 50),
     depth: Number(formData.get("depth") || 1),
+    renderer: String(formData.get("renderer") || "http").trim(),
   };
   const taskName = String(formData.get("task_name") || "").trim();
   if (taskName) {
@@ -171,6 +178,7 @@ function renderTaskList(tasks) {
 function selectTask(taskId) {
   state.selectedTaskId = taskId;
   elements.selectedTaskLabel.textContent = taskId ? `当前任务: ${taskId}` : "未选择任务";
+  resetWordcloudPreview();
   startEventStream(taskId);
 }
 
@@ -201,6 +209,7 @@ async function refreshSelectedTask() {
   elements.detail.innerHTML = [
     detailCard("task_id", task.task_id),
     detailCard("status", task.status),
+    detailCard("fetch_mode", task.fetch_mode || "http"),
     detailCard("root_url", task.root_url),
     detailCard("progress", `${task.progress}%`),
     detailCard("queue_total", String(queue.total)),
@@ -244,6 +253,56 @@ function startEventStream(taskId) {
     await refreshSelectedTask();
     await loadTasks();
   };
+}
+
+async function onGenerateWordcloud() {
+  const taskId = state.selectedTaskId;
+  if (!taskId) {
+    renderOutput(elements.commandOutput, { message: "请先选择任务再生成词云图", code: 1001, data: null });
+    return;
+  }
+
+  const response = await fetch(`/v1/tasks/${encodeURIComponent(taskId)}/wordcloud`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ view: "auto", width: 1200, height: 720, top_n: 80 }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.json();
+    renderOutput(elements.commandOutput, errorBody);
+    return;
+  }
+
+  const blob = await response.blob();
+  if (state.wordcloudUrl) {
+    URL.revokeObjectURL(state.wordcloudUrl);
+  }
+  state.wordcloudUrl = URL.createObjectURL(blob);
+  elements.wordcloudImage.src = state.wordcloudUrl;
+  elements.wordcloudPanel.classList.remove("hidden");
+
+  const view = response.headers.get("x-wordcloud-view") || "auto";
+  const topTerms = response.headers.get("x-wordcloud-top-terms") || "[]";
+  let topTermText = "";
+  try {
+    const terms = JSON.parse(topTerms);
+    topTermText = terms.slice(0, 5).map((item) => `${item.word}:${item.count}`).join(" | ");
+  } catch {
+    topTermText = "";
+  }
+  elements.wordcloudMeta.textContent = `来源=${view}${topTermText ? ` | 热词=${topTermText}` : ""}`;
+  renderOutput(elements.commandOutput, { code: 0, message: "词云图已生成", data: { task_id: taskId, view } });
+}
+
+function resetWordcloudPreview() {
+  if (state.wordcloudUrl) {
+    URL.revokeObjectURL(state.wordcloudUrl);
+    state.wordcloudUrl = null;
+  }
+  elements.wordcloudPanel.classList.add("hidden");
+  elements.wordcloudImage.removeAttribute("src");
+  elements.wordcloudMeta.textContent = "尚未生成";
 }
 
 function appendLogLine(payload) {

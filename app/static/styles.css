@@ -160,6 +160,10 @@ h2 {
   margin-bottom: 16px;
 }
 
+.section-head.compact {
+  margin-bottom: 10px;
+}
+
 .grid-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -192,7 +196,23 @@ input {
   font-size: 14px;
 }
 
+select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.84);
+  color: var(--ink);
+  padding: 12px 14px;
+  font-size: 14px;
+  font-family: Consolas, "Courier New", monospace;
+}
+
 input:focus {
+  outline: 2px solid rgba(178, 76, 44, 0.22);
+  border-color: rgba(178, 76, 44, 0.3);
+}
+
+select:focus {
   outline: 2px solid rgba(178, 76, 44, 0.22);
   border-color: rgba(178, 76, 44, 0.3);
 }
@@ -284,6 +304,27 @@ button:hover {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.wordcloud-panel {
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.wordcloud-panel img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 14px;
+  border: 1px solid rgba(27, 34, 48, 0.08);
+  background: #fffaf2;
+}
+
+.hidden {
+  display: none;
 }
 
 .detail-card dd {

@@ -6,6 +6,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from app import db
 from app.command_engine import execute_command
@@ -164,6 +165,20 @@ class DayFiveDaySixTests(unittest.TestCase):
         task = self._wait_for_terminal_status(created["task_id"])
         self.assertEqual(task["status"], "success")
         self.assertEqual(task["done_count"], 2)
+
+    def test_worker_passes_browser_fetch_mode_to_fetcher(self) -> None:
+        observed: list[tuple[str, str]] = []
+
+        def routed_fetcher(url: str, fetch_mode: str = "http") -> CrawlResult:
+            observed.append((url, fetch_mode))
+            return CrawlResult(discovered_urls=[], status_code=200, page_title="browser page")
+
+        with patch("app.worker._fetch_url", side_effect=routed_fetcher):
+            started = execute_command("crawl start url=https://example.com/news renderer=browser")
+            task = self._wait_for_terminal_status(started["task_id"])
+
+        self.assertEqual(task["status"], "success")
+        self.assertEqual(observed[0], ("https://example.com/news", "browser"))
 
     def _wait_for_terminal_status(self, task_id: str, timeout_seconds: float = 3) -> dict[str, object]:
         deadline = time.time() + timeout_seconds

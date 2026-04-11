@@ -53,6 +53,13 @@
           <span>Task Name</span>
           <input id="submit-task-name" name="task_name" type="text" placeholder="optional">
         </label>
+        <label>
+          <span>Renderer</span>
+          <select id="submit-renderer" name="renderer">
+            <option value="http" selected>HTTP</option>
+            <option value="browser">Browser / Playwright</option>
+          </select>
+        </label>
         <button class="action" type="submit">开始爬取</button>
       </form>
       <pre id="submit-output" class="output-box"></pre>
@@ -89,11 +96,19 @@
       <div class="section-head">
         <h2>任务详情</h2>
         <div class="export-actions">
+          <button id="generate-wordcloud" class="ghost">生成词云图</button>
           <button data-format="json" id="export-json" class="ghost">导出 JSON</button>
           <button data-format="csv" id="export-csv" class="ghost">导出 CSV</button>
         </div>
       </div>
       <div id="task-detail" class="detail-grid"></div>
+      <div id="wordcloud-panel" class="wordcloud-panel hidden">
+        <div class="section-head compact">
+          <h2>词云图</h2>
+          <span id="wordcloud-meta" class="muted">尚未生成</span>
+        </div>
+        <img id="wordcloud-image" alt="任务词云图预览">
+      </div>
     </section>
 
     <section class="panel events-panel">
