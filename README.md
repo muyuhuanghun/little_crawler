@@ -123,8 +123,8 @@
 - 后端：Python + FastAPI。
 - 异步任务：Celery + Redis（MVP 可先用进程内队列）。
 - 数据库：PostgreSQL（SQLite 仅用于本地原型）。
-- 前端：React + 命令行控制组件。
-- 实时推送：WebSocket。
+- 前端：MVP 当前使用 FastAPI 挂载的原生 HTML/CSS/JavaScript 控制台，后续可升级为 React。
+- 实时推送：MVP 当前使用 SSE，后续可升级为 WebSocket。
 - 部署：Linux 云服务器 + systemd/Supervisor + Nginx。
 
 ### 3.3 模块拆分
@@ -168,7 +168,7 @@
   - 出参：分页结果
 - `POST /v1/tasks/{task_id}/export`
   - 入参：`format=json|csv`
-  - 出参：`download_id` 或 `download_url`
+  - 出参：同步附件下载响应
 - `GET /v1/events/stream?task_id=...`
   - 出参：实时事件流（WebSocket/SSE）
 - `GET /v1/health`
@@ -262,7 +262,7 @@
 
 ## 4. 当前进度确认
 
-截至当前仓库状态，项目已经完成 Day 1-9 的后端原型能力。
+截至当前仓库状态，项目已经完成 Day 1-11 的 MVP 原型能力。
 
 ### 4.1 已完成
 
@@ -309,21 +309,31 @@ Day 9：
 - 任务结束后会短暂等待尾部事件，再自动关闭流
 - 不存在的 `task_id` 会返回标准 `404` 错误载荷
 
+Day 10：
+- 已提供网页控制台首页 `/`
+- 前端通过同源 API 调用 `submit`、`command`、`tasks`、`results`、`events/stream`
+- 页面已支持任务选择、快捷命令、详情展示、实时事件流和导出按钮
+
+Day 11：
+- 已支持 `POST /v1/tasks/{task_id}/export`
+- 可将 `clean_items` 同步导出为 `JSON` 或 `CSV` 附件
+- 已补充导出接口与静态页面路由测试
+
 ### 4.2 当前未完成
 
-- 前端页面
-- 导出接口
 - API Key 鉴权
 - 生产部署脚本与配置
+- PostgreSQL / Redis 生产化切换
+- 更完整的前端看板能力（队列分栏、结果表分页、鉴权态）
 
 ### 4.3 当前结论
 
-现在的仓库是“后端控制面原型”，还不是“可被他人访问的网站”。
+现在的仓库已经是“可本地访问的网页型控制台 MVP”，但还不是“可安全公网部署的生产系统”。
 
 要达到最终目标，下一阶段必须继续完成：
-1. Day 10：前端页面。
-2. Day 11-14：导出、鉴权、测试、上线准备。
-3. 部署阶段：Nginx、进程守护、PostgreSQL/Redis、HTTPS、域名与监控。
+1. 鉴权与环境变量治理。
+2. PostgreSQL / Redis / Nginx 的部署链路。
+3. 前端完善、压测、监控与公网发布准备。
 
 ---
 
@@ -339,6 +349,12 @@ python main.py
 
 ```text
 http://127.0.0.1:8000
+```
+
+浏览器入口：
+
+```text
+http://127.0.0.1:8000/
 ```
 
 ---
@@ -385,6 +401,25 @@ Invoke-WebRequest `
   -Headers @{Accept="text/event-stream"}
 ```
 
+### 6.6 导出清洗结果
+
+```powershell
+Invoke-WebRequest `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/v1/tasks/<task_id>/export `
+  -ContentType "application/json" `
+  -Body '{"format":"csv"}' `
+  -OutFile .\clean_results.csv
+```
+
+### 6.7 打开网页控制台
+
+直接访问：
+
+```text
+http://127.0.0.1:8000/
+```
+
 ---
 
 ## 7. 测试
@@ -395,6 +430,8 @@ Invoke-WebRequest `
 - Day 5-6 队列消费、抓取成功/失败、暂停恢复
 - Day 7-8 原始结果落库、清洗去重、结果查询
 - Day 9 事件流回放、`after_id` 增量订阅、未知任务错误返回
+- Day 10 导出接口成功/失败路径
+- Day 11 首页与静态资源可访问性
 
 执行方式：
 
@@ -404,18 +441,20 @@ python -m unittest discover -s tests -p "test_day3_day4.py" -v
 python -m unittest discover -s tests -p "test_day5_day6.py" -v
 python -m unittest discover -s tests -p "test_day7_day8.py" -v
 python -m unittest discover -s tests -p "test_day9.py" -v
-python -m unittest discover -s tests -p "test_*.py"
+python -m unittest discover -s tests -p "test_day10.py" -v
+python -m unittest discover -s tests -p "test_day11.py" -v
+python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 ---
 
 ## 8. 后续建议
 
-建议按下面顺序推进，避免先做前端再返工后端协议：
+建议按下面顺序推进：
 
-1. 开始 Day 10 的 React 前端页面。
-2. 完成导出接口与鉴权。
-3. 切换到 PostgreSQL/Redis，准备服务器部署。
+1. 加入 API Key 鉴权与环境变量配置。
+2. 把 SQLite 进程内原型切换到 PostgreSQL / Redis 部署版。
+3. 补队列分页、结果分页、前端结果表和生产监控。
 
 ---
 

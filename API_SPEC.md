@@ -1,13 +1,13 @@
-# 接口字段字典 v1.0
+# 接口字段字典 v1.1
 
 ## 1. 基本约定
 
 - 协议：HTTP/HTTPS
 - 数据格式：`application/json; charset=utf-8`
-- 鉴权：`Authorization: Bearer <API_KEY>`
+- 鉴权：当前 MVP 未启用，后续计划接入 `Authorization: Bearer <API_KEY>`
 - 时间格式：ISO8601（例如 `2026-04-07T20:15:30+08:00`）
 - 分页默认：`page=1`，`page_size=20`
-- 统一响应结构：
+- 除文件流接口外，统一响应结构：
 
 ```json
 {
@@ -27,7 +27,7 @@
 | message | string | 是 | 结果说明 |
 | request_id | string | 是 | 请求链路追踪 ID |
 | data | object/array/null | 是 | 业务数据 |
-| meta | object | 否 | 分页、耗时等扩展信息 |
+| meta | object | 否 | 分页、耗时等扩展信息；当前多数接口未返回该字段 |
 
 ---
 
@@ -146,9 +146,7 @@
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---|---|---|
-| state | string | 否 | all | `pending/running/done/failed` |
-| page | integer | 否 | 1 | 页码 |
-| page_size | integer | 否 | 20 | 每页数量 |
+| state | string | 否 | all | `pending/running/done/failed/canceled/all` |
 
 响应 `data`：
 
@@ -168,13 +166,13 @@
 | last_error | string/null | 最近失败原因 |
 | updated_at | string | 更新时间 |
 
-响应 `meta`：
+响应 `data` 额外字段：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| page | integer | 当前页 |
-| page_size | integer | 每页数量 |
-| total | integer | 总记录数 |
+| task_id | string | 任务 ID |
+| state | string | 当前过滤条件 |
+| total | integer | 当前返回项总数 |
 
 ---
 
@@ -228,20 +226,33 @@
 |---|---|---|---|---|
 | format | string | 是 | - | `json` 或 `csv` |
 
-响应 `data`：
+成功响应：
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| download_id | string | 导出任务 ID |
-| download_url | string | 下载地址（若同步可直接返回） |
-| expires_at | string | 下载地址失效时间 |
+- 返回同步文件流，不包裹在统一 JSON 结构中
+- `Content-Type`：
+  - `application/json; charset=utf-8`
+  - `text/csv; charset=utf-8`
+- `Content-Disposition`：`attachment; filename="<task_id>_clean_results.<ext>"`
+- 当前导出内容来源于 `clean_items`
+
+失败响应：
+
+- 仍使用统一 JSON 错误结构
+- `task_id` 不存在时返回 `404 / code=2001`
+- `format` 非法时返回 `400 / code=1001`
 
 ---
 
 ### 3.7 实时事件流
 
 - 方法：`GET /v1/events/stream?task_id=<task_id>`
-- 协议：WebSocket 或 SSE（二选一，推荐 WebSocket）
+- 协议：SSE（`text/event-stream`）
+- 查询参数：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---|---|---|
+| task_id | string | 是 | - | 任务 ID |
+| after_id | integer | 否 | 0 | 仅返回大于该事件 ID 的新事件 |
 
 事件结构：
 
@@ -261,12 +272,23 @@
 
 事件类型：
 - `task_created`
+- `task_started`
+- `task_resumed`
+- `task_paused`
+- `task_stopped`
 - `queue_enqueued`
 - `crawl_item_success`
 - `crawl_item_failed`
 - `clean_item_success`
 - `clean_item_failed`
 - `task_finished`
+
+说明：
+
+- 支持历史事件回放
+- 支持 `after_id` 增量续传
+- 任务进入终态后，服务端会在短暂空闲后自动关闭流
+- 不存在的任务返回统一 JSON 错误结构，而不是 SSE 帧
 
 ---
 
@@ -294,10 +316,6 @@
 | 1003 | 不支持的命令 |
 | 2001 | 任务不存在 |
 | 2002 | 状态迁移非法 |
-| 3001 | 抓取超时 |
-| 3002 | 抓取请求失败 |
-| 3003 | 解析失败 |
-| 4001 | 清洗失败 |
 | 5000 | 系统内部错误 |
 
 ## 5. 命令语法规则
@@ -307,3 +325,9 @@
 - Key/Value 分隔：`=`
 - 非法命令处理：返回 `1003`
 - 参数缺失处理：返回 `1001`
+
+## 6. 页面入口
+
+- 网页控制台首页：`GET /`
+- 静态资源前缀：`/static/*`
+- 当前前端为 FastAPI 同源挂载的原生静态页面，直接调用本文件中的后端接口

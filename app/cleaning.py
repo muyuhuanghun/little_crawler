@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import html
+import io
 import json
 import re
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ DEFAULT_PAGE = 1
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
 RESULT_VIEWS = {"raw", "clean"}
+EXPORT_FORMATS = {"json", "csv"}
 
 
 @dataclass(slots=True)
@@ -234,6 +237,57 @@ def list_results(
         "page_size": normalized_page_size,
         "total": total_row["total"],
         "items": items,
+    }
+
+
+def export_results(task_id: str, export_format: str) -> dict[str, Any]:
+    _ensure_task_exists(task_id)
+    normalized_format = export_format.strip().lower()
+    if normalized_format not in EXPORT_FORMATS:
+        raise AppError(1001, "format must be one of json, csv")
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                id, raw_id, clean_news_date, clean_news_title,
+                clean_news_content, dedup_key, clean_status, cleaned_at
+            FROM clean_items
+            WHERE task_id = ?
+            ORDER BY id ASC
+            """,
+            (task_id,),
+        ).fetchall()
+
+    items = [dict(row) for row in rows]
+    filename = f"{task_id}_clean_results.{normalized_format}"
+
+    if normalized_format == "json":
+        content = json.dumps(items, ensure_ascii=False, indent=2)
+        return {
+            "filename": filename,
+            "media_type": "application/json; charset=utf-8",
+            "content": content.encode("utf-8"),
+        }
+
+    buffer = io.StringIO()
+    fieldnames = [
+        "id",
+        "raw_id",
+        "clean_news_date",
+        "clean_news_title",
+        "clean_news_content",
+        "dedup_key",
+        "clean_status",
+        "cleaned_at",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(items)
+    return {
+        "filename": filename,
+        "media_type": "text/csv; charset=utf-8",
+        "content": buffer.getvalue().encode("utf-8"),
     }
 
 

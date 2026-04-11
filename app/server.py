@@ -4,16 +4,19 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 import uuid
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.cleaning import list_results
+from app.cleaning import export_results, list_results
 from app.command_engine import execute_command
 from app.db import init_db
 from app.errors import AppError, ERROR_MESSAGES
@@ -34,6 +37,7 @@ HOST = "127.0.0.1"
 PORT = 8000
 EVENT_STREAM_POLL_INTERVAL_SECONDS = 0.1
 EVENT_STREAM_IDLE_TIMEOUT_SECONDS = 5
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 class SubmitTaskRequest(BaseModel):
@@ -52,6 +56,12 @@ class CommandRequest(BaseModel):
     request_id: str | None = None
 
 
+class ExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format: str = Field(min_length=1)
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> Any:
     init_db()
@@ -61,6 +71,7 @@ async def _lifespan(_: FastAPI) -> Any:
 
 def create_app() -> FastAPI:
     api = FastAPI(title="PyMS Control Plane", version="0.1.0", lifespan=_lifespan)
+    api.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @api.exception_handler(AppError)
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
@@ -97,6 +108,10 @@ def create_app() -> FastAPI:
             },
         )
 
+    @api.get("/", response_class=FileResponse)
+    async def index() -> FileResponse:
+        return FileResponse(STATIC_DIR / "index.html")
+
     @api.get("/v1/tasks")
     async def tasks(request: Request, task_id: str | None = None) -> dict[str, Any]:
         data = get_task(task_id) if task_id else list_tasks()
@@ -122,6 +137,18 @@ def create_app() -> FastAPI:
         return _ok_payload(
             _request_id(request),
             list_results(task_id=task_id, view=view, page=page, page_size=page_size, query=q),
+        )
+
+    @api.post("/v1/tasks/{task_id}/export")
+    async def task_export(task_id: str, payload: ExportRequest) -> StreamingResponse:
+        exported = export_results(task_id, payload.format)
+        headers = {
+            "Content-Disposition": f'attachment; filename="{exported["filename"]}"',
+        }
+        return StreamingResponse(
+            BytesIO(exported["content"]),
+            media_type=exported["media_type"],
+            headers=headers,
         )
 
     @api.get("/v1/events/stream")
