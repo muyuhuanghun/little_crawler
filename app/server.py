@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.cleaning import export_results, list_results
 from app.command_engine import execute_command
+from app.config import get_settings
 from app.db import init_db
 from app.errors import AppError, ERROR_MESSAGES
 from app.service import (
@@ -34,8 +35,6 @@ from app.worker import get_queue_runner
 from app.wordclouds import generate_wordcloud
 
 
-HOST = "127.0.0.1"
-PORT = 8000
 EVENT_STREAM_POLL_INTERVAL_SECONDS = 0.1
 EVENT_STREAM_IDLE_TIMEOUT_SECONDS = 5
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -81,8 +80,21 @@ async def _lifespan(_: FastAPI) -> Any:
 
 
 def create_app() -> FastAPI:
+    settings = get_settings()
     api = FastAPI(title="PyMS Control Plane", version="0.1.0", lifespan=_lifespan)
     api.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @api.middleware("http")
+    async def enforce_api_key(request: Request, call_next: Any) -> JSONResponse | StreamingResponse:
+        if not _requires_api_key(request, settings):
+            return await call_next(request)
+
+        if _read_api_key(request) != settings.api_key:
+            return JSONResponse(
+                status_code=401,
+                content=_error_payload(_request_id(request), 1004, ERROR_MESSAGES[1004]),
+            )
+        return await call_next(request)
 
     @api.exception_handler(AppError)
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
@@ -115,6 +127,12 @@ def create_app() -> FastAPI:
             {
                 "status": "ok",
                 "version": "0.1.0",
+                "environment": settings.app_env,
+                "auth": {"api_key_required": settings.api_key_enabled},
+                "storage": {
+                    "db_url": settings.db_url,
+                    "redis_url": settings.redis_url,
+                },
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -133,8 +151,14 @@ def create_app() -> FastAPI:
         return _ok_payload(_request_id(request), get_task(task_id))
 
     @api.get("/v1/tasks/{task_id}/queue")
-    async def task_queue(task_id: str, request: Request, state: str | None = None) -> dict[str, Any]:
-        return _ok_payload(_request_id(request), list_queue_items(task_id, state))
+    async def task_queue(
+        task_id: str,
+        request: Request,
+        state: str | None = None,
+        page: int = 1,
+        page_size: int | None = None,
+    ) -> dict[str, Any]:
+        return _ok_payload(_request_id(request), list_queue_items(task_id, state, page=page, page_size=page_size))
 
     @api.get("/v1/tasks/{task_id}/results")
     async def task_results(
@@ -256,8 +280,33 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
-def run(host: str = HOST, port: int = PORT) -> None:
-    uvicorn.run(app, host=host, port=port)
+def run(host: str | None = None, port: int | None = None) -> None:
+    settings = get_settings()
+    uvicorn.run(app, host=host or settings.host, port=port or settings.port)
+
+
+def _requires_api_key(request: Request, settings: Any) -> bool:
+    if not settings.api_key_enabled:
+        return False
+    path = request.url.path
+    if path == "/" or path == "/v1/health" or path.startswith("/static/"):
+        return False
+    return path.startswith("/v1/")
+
+
+def _read_api_key(request: Request) -> str | None:
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token:
+            return token
+    x_api_key = request.headers.get("X-API-Key")
+    if x_api_key and x_api_key.strip():
+        return x_api_key.strip()
+    query_api_key = request.query_params.get("api_key")
+    if query_api_key and query_api_key.strip():
+        return query_api_key.strip()
+    return None
 
 
 def _request_id(request: Request | None) -> str:

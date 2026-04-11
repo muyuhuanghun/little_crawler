@@ -327,13 +327,21 @@ Day 12-13：
 
 ### 4.2 当前未完成
 
-- API Key 鉴权
 - 生产部署脚本与配置
 - PostgreSQL / Redis 生产化切换
-- 更完整的前端看板能力（队列分栏、结果表分页、鉴权态）
+- 用户注册 / 登录与账号体系
+- 生产监控与告警
 - Playwright 运行依赖的安装引导与运行期环境探测优化
 
-### 4.3 当前结论
+### 4.3 本轮已补充
+
+- 已支持基于环境变量的运行配置读取
+- 已支持可选启用的 API Key 鉴权
+- 已支持队列分页与按状态汇总计数
+- 已补齐前端结果表分页、队列分页和 API Key 输入态
+- 已重做控制台界面，提升整体视觉与操作流
+
+### 4.4 当前结论
 
 现在的仓库已经是“可本地访问的网页型控制台 MVP”，但还不是“可安全公网部署的生产系统”。
 
@@ -345,6 +353,28 @@ Day 12-13：
 ---
 
 ## 5. 本地启动
+
+### 5.1 环境变量
+
+可选环境变量：
+
+- `PYMS_APP_ENV`：运行环境标识，默认 `development`
+- `PYMS_HOST`：监听地址，默认 `127.0.0.1`
+- `PYMS_PORT`：监听端口，默认 `8000`
+- `PYMS_API_KEY`：启用后，所有 `/v1/*` 业务接口需要 API Key
+- `PYMS_DB_URL`：当前用于声明目标数据库连接串，默认 `sqlite:///data/app.db`
+- `PYMS_REDIS_URL`：当前用于声明目标 Redis 连接串，默认 `redis://127.0.0.1:6379/0`
+- `PYMS_QUEUE_PAGE_SIZE`：队列接口默认分页大小
+- `PYMS_QUEUE_PAGE_SIZE_MAX`：队列接口最大分页大小
+- `PYMS_RESULT_PAGE_SIZE`：结果接口默认分页大小
+- `PYMS_RESULT_PAGE_SIZE_MAX`：结果接口最大分页大小
+
+PowerShell 示例：
+
+```powershell
+$env:PYMS_API_KEY="replace-with-real-key"
+$env:PYMS_PORT="8000"
+```
 
 ```powershell
 & .\myvenv\Scripts\Activate.ps1
@@ -380,6 +410,7 @@ http://127.0.0.1:8000/
 Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:8000/v1/crawl/submit `
+  -Headers @{Authorization="Bearer replace-with-real-key"} `
   -ContentType "application/json" `
   -Body '{"url":"https://example.com/news","limit":10,"depth":1,"renderer":"http"}'
 ```
@@ -387,7 +418,9 @@ Invoke-RestMethod `
 ### 6.2 查询任务列表
 
 ```powershell
-Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks
+Invoke-RestMethod `
+  -Uri http://127.0.0.1:8000/v1/tasks `
+  -Headers @{Authorization="Bearer replace-with-real-key"}
 ```
 
 ### 6.3 发送命令
@@ -396,6 +429,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks
 Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:8000/v1/command `
+  -Headers @{Authorization="Bearer replace-with-real-key"} `
   -ContentType "application/json" `
   -Body '{"command":"crawl start url=https://example.com/news limit=10 depth=1 renderer=browser","request_id":"req_manual_001"}'
 ```
@@ -403,14 +437,16 @@ Invoke-RestMethod `
 ### 6.4 查询单个任务
 
 ```powershell
-Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/tasks/<task_id>
+Invoke-RestMethod `
+  -Uri http://127.0.0.1:8000/v1/tasks/<task_id> `
+  -Headers @{Authorization="Bearer replace-with-real-key"}
 ```
 
 ### 6.5 订阅事件流
 
 ```powershell
 Invoke-WebRequest `
-  -Uri "http://127.0.0.1:8000/v1/events/stream?task_id=<task_id>&after_id=0" `
+  -Uri "http://127.0.0.1:8000/v1/events/stream?task_id=<task_id>&after_id=0&api_key=replace-with-real-key" `
   -Headers @{Accept="text/event-stream"}
 ```
 
@@ -420,6 +456,7 @@ Invoke-WebRequest `
 Invoke-WebRequest `
   -Method Post `
   -Uri http://127.0.0.1:8000/v1/tasks/<task_id>/export `
+  -Headers @{Authorization="Bearer replace-with-real-key"} `
   -ContentType "application/json" `
   -Body '{"format":"csv"}' `
   -OutFile .\clean_results.csv
@@ -439,6 +476,7 @@ http://127.0.0.1:8000/
 Invoke-WebRequest `
   -Method Post `
   -Uri http://127.0.0.1:8000/v1/tasks/<task_id>/wordcloud `
+  -Headers @{Authorization="Bearer replace-with-real-key"} `
   -ContentType "application/json" `
   -Body '{"view":"auto","width":1200,"height":720,"top_n":80}' `
   -OutFile .\task_wordcloud.png
@@ -459,6 +497,7 @@ Invoke-WebRequest `
 - Day 12 中文编码识别修复
 - Day 13 词云图接口与回退逻辑
 - Day 14 `renderer=browser` 任务配置与 worker 分发
+- Day 15 API Key 鉴权与队列分页响应结构
 
 执行方式：
 
@@ -481,9 +520,10 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 建议按下面顺序推进：
 
-1. 加入 API Key 鉴权与环境变量配置。
-2. 把 SQLite 进程内原型切换到 PostgreSQL / Redis 部署版。
-3. 补队列分页、结果分页、前端结果表和生产监控。
+1. 把 SQLite 进程内原型切换到 PostgreSQL / Redis 部署版。
+2. 把进程内队列切换到 Celery + Redis，并补 worker / beat / 重试策略。
+3. 补生产监控、告警、部署脚本和运行环境探测。
+4. 设计并接入用户注册、登录和会话体系。
 
 ---
 

@@ -3,6 +3,7 @@ ERROR_MESSAGES = {
     1001: "invalid parameters",
     1002: "url is invalid or forbidden",
     1003: "unsupported command",
+    1004: "unauthorized",
     2001: "task not found",
     2002: "invalid state transition",
     5000: "internal server error",

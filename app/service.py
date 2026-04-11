@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from app.config import get_settings
 from app.db import get_connection
 from app.errors import AppError
 from app.security import validate_target_url
@@ -19,6 +20,7 @@ MAX_DEPTH = 5
 QUEUE_STATES = {"pending", "running", "done", "failed", "canceled"}
 TERMINAL_EVENT_TYPES = {"task_finished", "task_stopped"}
 FETCH_MODES = {"http", "browser"}
+DEFAULT_QUEUE_PAGE = 1
 
 
 @dataclass(slots=True)
@@ -223,7 +225,12 @@ def transition_task(task_id: str, target_status: str) -> dict[str, Any]:
     return get_task(task_id)
 
 
-def list_queue_items(task_id: str, state: str | None = None) -> dict[str, Any]:
+def list_queue_items(
+    task_id: str,
+    state: str | None = None,
+    page: int = DEFAULT_QUEUE_PAGE,
+    page_size: int | None = None,
+) -> dict[str, Any]:
     _ensure_task_exists(task_id)
     normalized_state = None
     if state is not None:
@@ -232,8 +239,40 @@ def list_queue_items(task_id: str, state: str | None = None) -> dict[str, Any]:
             normalized_state = None
         elif normalized_state not in QUEUE_STATES:
             raise AppError(1001, "state must be one of pending, running, done, failed, canceled, all")
+    settings = get_settings()
+    normalized_page = _normalize_int(page, "page", 1, 1_000_000)
+    normalized_page_size = _normalize_int(
+        settings.queue_page_size_default if page_size is None else page_size,
+        "page_size",
+        1,
+        settings.queue_page_size_max,
+    )
+    offset = (normalized_page - 1) * normalized_page_size
 
     with get_connection() as connection:
+        total_row = connection.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM queue_items
+            WHERE task_id = ?
+            """
+            if normalized_state is None
+            else """
+            SELECT COUNT(*) AS total
+            FROM queue_items
+            WHERE task_id = ? AND state = ?
+            """,
+            (task_id,) if normalized_state is None else (task_id, normalized_state),
+        ).fetchone()
+        count_rows = connection.execute(
+            """
+            SELECT state, COUNT(*) AS total
+            FROM queue_items
+            WHERE task_id = ?
+            GROUP BY state
+            """,
+            (task_id,),
+        ).fetchall()
         if normalized_state is None:
             rows = connection.execute(
                 """
@@ -241,8 +280,9 @@ def list_queue_items(task_id: str, state: str | None = None) -> dict[str, Any]:
                 FROM queue_items
                 WHERE task_id = ?
                 ORDER BY id ASC
+                LIMIT ? OFFSET ?
                 """,
-                (task_id,),
+                (task_id, normalized_page_size, offset),
             ).fetchall()
         else:
             rows = connection.execute(
@@ -251,8 +291,9 @@ def list_queue_items(task_id: str, state: str | None = None) -> dict[str, Any]:
                 FROM queue_items
                 WHERE task_id = ? AND state = ?
                 ORDER BY id ASC
+                LIMIT ? OFFSET ?
                 """,
-                (task_id, normalized_state),
+                (task_id, normalized_state, normalized_page_size, offset),
             ).fetchall()
 
     items = [
@@ -268,10 +309,17 @@ def list_queue_items(task_id: str, state: str | None = None) -> dict[str, Any]:
         }
         for row in rows
     ]
+    counts_by_state = {row["state"]: row["total"] for row in count_rows}
     return {
         "task_id": task_id,
         "state": normalized_state or "all",
-        "total": len(items),
+        "page": normalized_page,
+        "page_size": normalized_page_size,
+        "total": total_row["total"],
+        "counts_by_state": {
+            queue_state: counts_by_state.get(queue_state, 0)
+            for queue_state in ("pending", "running", "done", "failed", "canceled")
+        },
         "items": items,
     }
 
