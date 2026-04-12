@@ -183,227 +183,232 @@ class QueueRunner:
             self._wake_event.clear()
 
     def _process_next_queue_item(self) -> bool:
-        with get_connection() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                    q.id,
-                    q.task_id,
-                    q.url,
-                    q.hop_count,
-                    t.limit_count,
-                    t.depth,
-                    t.fetch_mode
-                FROM queue_items q
-                JOIN tasks t ON t.task_id = q.task_id
-                WHERE t.status = ? AND q.state = 'pending'
-                ORDER BY q.priority DESC, q.id ASC
-                LIMIT 1
-                """,
-                (TaskStatus.RUNNING.value,),
-            ).fetchone()
+        return process_next_queue_item_once()
 
-            if row is None:
-                return False
 
-            now = _now()
-            updated = connection.execute(
-                """
-                UPDATE queue_items
-                SET state = 'running', updated_at = ?, last_error = NULL
-                WHERE id = ? AND state = 'pending'
-                """,
-                (now, row["id"]),
-            )
-            if updated.rowcount == 0:
-                return True
+def process_next_queue_item_once() -> bool:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                q.id,
+                q.task_id,
+                q.url,
+                q.hop_count,
+                t.limit_count,
+                t.depth,
+                t.fetch_mode
+            FROM queue_items q
+            JOIN tasks t ON t.task_id = q.task_id
+            WHERE t.status = ? AND q.state = 'pending'
+            ORDER BY q.priority DESC, q.id ASC
+            LIMIT 1
+            """,
+            (TaskStatus.RUNNING.value,),
+        ).fetchone()
 
-        try:
-            result = _fetch_url(row["url"], row["fetch_mode"])
-        except Exception as exc:
-            self._mark_item_failed(row["task_id"], row["id"], row["url"], str(exc))
+        if row is None:
+            return False
+
+        now = _now()
+        updated = connection.execute(
+            """
+            UPDATE queue_items
+            SET state = 'running', updated_at = ?, last_error = NULL
+            WHERE id = ? AND state = 'pending'
+            """,
+            (now, row["id"]),
+        )
+        if updated.rowcount == 0:
             return True
 
-        self._mark_item_done(
-            task_id=row["task_id"],
-            queue_item_id=row["id"],
-            url=row["url"],
-            hop_count=row["hop_count"],
-            limit_count=row["limit_count"],
-            max_depth=row["depth"],
-            result=result,
-        )
+    try:
+        result = _fetch_url(row["url"], row["fetch_mode"])
+    except Exception as exc:
+        _mark_item_failed(row["task_id"], row["id"], row["url"], str(exc))
         return True
 
-    def _mark_item_done(
-        self,
-        task_id: str,
-        queue_item_id: int,
-        url: str,
-        hop_count: int,
-        limit_count: int,
-        max_depth: int,
-        result: CrawlResult,
-    ) -> None:
-        now = _now()
-        with get_connection() as connection:
-            task = connection.execute(
-                "SELECT status FROM tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            if task is None:
-                return
-            if task["status"] == TaskStatus.STOPPED.value:
-                connection.execute(
-                    """
-                    UPDATE queue_items
-                    SET state = 'canceled', updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, queue_item_id),
-                )
-                return
+    _mark_item_done(
+        task_id=row["task_id"],
+        queue_item_id=row["id"],
+        url=row["url"],
+        hop_count=row["hop_count"],
+        limit_count=row["limit_count"],
+        max_depth=row["depth"],
+        result=result,
+    )
+    return True
 
+
+def _mark_item_done(
+    task_id: str,
+    queue_item_id: int,
+    url: str,
+    hop_count: int,
+    limit_count: int,
+    max_depth: int,
+    result: CrawlResult,
+) -> None:
+    now = _now()
+    with get_connection() as connection:
+        task = connection.execute(
+            "SELECT status FROM tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if task is None:
+            return
+        if task["status"] == TaskStatus.STOPPED.value:
             connection.execute(
                 """
                 UPDATE queue_items
-                SET state = 'done', updated_at = ?, last_error = NULL
+                SET state = 'canceled', updated_at = ?
                 WHERE id = ?
                 """,
                 (now, queue_item_id),
             )
-            connection.execute(
-                """
-                UPDATE tasks
-                SET done_count = done_count + 1
-                WHERE task_id = ?
-                """,
-                (task_id,),
+            return
+
+        connection.execute(
+            """
+            UPDATE queue_items
+            SET state = 'done', updated_at = ?, last_error = NULL
+            WHERE id = ?
+            """,
+            (now, queue_item_id),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET done_count = done_count + 1
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        raw_saved_count = save_raw_items(task_id, result.raw_items or [], now, connection=connection)
+        _insert_event(
+            connection,
+            task_id,
+            "crawl_item_success",
+            {
+                "url": url,
+                "status_code": result.status_code,
+                "page_title": result.page_title,
+                "raw_saved_count": raw_saved_count,
+            },
+            now,
+        )
+
+        if hop_count < max_depth:
+            _enqueue_discovered_urls(
+                connection=connection,
+                task_id=task_id,
+                parent_url=url,
+                hop_count=hop_count + 1,
+                limit_count=limit_count,
+                discovered_urls=result.discovered_urls,
+                created_at=now,
             )
-            raw_saved_count = save_raw_items(task_id, result.raw_items or [], now, connection=connection)
-            _insert_event(
-                connection,
-                task_id,
-                "crawl_item_success",
-                {
-                    "url": url,
-                    "status_code": result.status_code,
-                    "page_title": result.page_title,
-                    "raw_saved_count": raw_saved_count,
-                },
-                now,
-            )
 
-            if hop_count < max_depth:
-                self._enqueue_discovered_urls(
-                    connection=connection,
-                    task_id=task_id,
-                    parent_url=url,
-                    hop_count=hop_count + 1,
-                    limit_count=limit_count,
-                    discovered_urls=result.discovered_urls,
-                    created_at=now,
-                )
+        _finalize_task_if_needed(connection, task_id, now)
 
-            _finalize_task_if_needed(connection, task_id, now)
 
-    def _mark_item_failed(self, task_id: str, queue_item_id: int, url: str, error_message: str) -> None:
-        now = _now()
-        with get_connection() as connection:
-            task = connection.execute(
-                "SELECT status FROM tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            if task is None:
-                return
-            if task["status"] == TaskStatus.STOPPED.value:
-                connection.execute(
-                    """
-                    UPDATE queue_items
-                    SET state = 'canceled', updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, queue_item_id),
-                )
-                return
-
+def _mark_item_failed(task_id: str, queue_item_id: int, url: str, error_message: str) -> None:
+    now = _now()
+    with get_connection() as connection:
+        task = connection.execute(
+            "SELECT status FROM tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if task is None:
+            return
+        if task["status"] == TaskStatus.STOPPED.value:
             connection.execute(
                 """
                 UPDATE queue_items
-                SET state = 'failed', updated_at = ?, last_error = ?
+                SET state = 'canceled', updated_at = ?
                 WHERE id = ?
                 """,
-                (now, error_message, queue_item_id),
+                (now, queue_item_id),
             )
-            connection.execute(
-                """
-                UPDATE tasks
-                SET failed_count = failed_count + 1
-                WHERE task_id = ?
-                """,
-                (task_id,),
-            )
-            _insert_event(
-                connection,
-                task_id,
-                "crawl_item_failed",
-                {"url": url, "error": error_message},
-                now,
-            )
-            _finalize_task_if_needed(connection, task_id, now)
+            return
 
-    def _enqueue_discovered_urls(
-        self,
-        connection: object,
-        task_id: str,
-        parent_url: str,
-        hop_count: int,
-        limit_count: int,
-        discovered_urls: list[str],
-        created_at: str,
-    ) -> None:
-        count_row = connection.execute(
-            "SELECT COUNT(*) AS total FROM queue_items WHERE task_id = ?",
+        connection.execute(
+            """
+            UPDATE queue_items
+            SET state = 'failed', updated_at = ?, last_error = ?
+            WHERE id = ?
+            """,
+            (now, error_message, queue_item_id),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET failed_count = failed_count + 1
+            WHERE task_id = ?
+            """,
             (task_id,),
-        ).fetchone()
-        queued_total = count_row["total"]
+        )
+        _insert_event(
+            connection,
+            task_id,
+            "crawl_item_failed",
+            {"url": url, "error": error_message},
+            now,
+        )
+        _finalize_task_if_needed(connection, task_id, now)
 
-        for discovered_url in discovered_urls:
-            if queued_total >= limit_count:
-                break
-            try:
-                validate_target_url(discovered_url)
-            except AppError:
-                continue
 
-            inserted = connection.execute(
-                """
-                INSERT OR IGNORE INTO queue_items (
-                    task_id, url, state, hop_count, retry_count, priority, next_run_at,
-                    last_error, created_at, updated_at
-                ) VALUES (?, ?, 'pending', ?, 0, 100, NULL, NULL, ?, ?)
-                """,
-                (task_id, discovered_url, hop_count, created_at, created_at),
-            )
-            if inserted.rowcount == 0:
-                continue
+def _enqueue_discovered_urls(
+    connection: object,
+    task_id: str,
+    parent_url: str,
+    hop_count: int,
+    limit_count: int,
+    discovered_urls: list[str],
+    created_at: str,
+) -> None:
+    count_row = connection.execute(
+        "SELECT COUNT(*) AS total FROM queue_items WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    queued_total = count_row["total"]
 
-            queued_total += 1
-            connection.execute(
-                """
-                UPDATE tasks
-                SET total_count = total_count + 1
-                WHERE task_id = ?
-                """,
-                (task_id,),
-            )
-            _insert_event(
-                connection,
-                task_id,
-                "queue_enqueued",
-                {"url": discovered_url, "parent_url": parent_url, "hop_count": hop_count},
-                created_at,
-            )
+    for discovered_url in discovered_urls:
+        if queued_total >= limit_count:
+            break
+        try:
+            validate_target_url(discovered_url)
+        except AppError:
+            continue
+
+        inserted = connection.execute(
+            """
+            INSERT OR IGNORE INTO queue_items (
+                task_id, url, state, hop_count, retry_count, priority, next_run_at,
+                last_error, created_at, updated_at
+            ) VALUES (?, ?, 'pending', ?, 0, 100, NULL, NULL, ?, ?)
+            """,
+            (task_id, discovered_url, hop_count, created_at, created_at),
+        )
+        if inserted.rowcount == 0:
+            continue
+
+        queued_total += 1
+        connection.execute(
+            """
+            UPDATE tasks
+            SET total_count = total_count + 1
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        _insert_event(
+            connection,
+            task_id,
+            "queue_enqueued",
+            {"url": discovered_url, "parent_url": parent_url, "hop_count": hop_count},
+            created_at,
+        )
 
 
 def get_queue_runner() -> QueueRunner | NoopQueueRunner:
@@ -422,7 +427,15 @@ def start_queue_runtime() -> None:
 
 
 def notify_queue_runner() -> None:
+    dispatch_queue_processing()
+
+
+def dispatch_queue_processing() -> None:
     if not _is_inprocess_backend():
+        if _is_celery_backend():
+            from app.celery_tasks import enqueue_queue_drain
+
+            enqueue_queue_drain()
         return
     get_queue_runner().notify()
 
@@ -447,14 +460,14 @@ def shutdown_queue_runner() -> None:
 
 
 def run_queue_worker_forever() -> None:
-    runner = QueueRunner()
     try:
         while True:
-            time.sleep(3600)
+            worked = process_next_queue_item_once()
+            if worked:
+                continue
+            time.sleep(POLL_INTERVAL_SECONDS)
     except KeyboardInterrupt:
         pass
-    finally:
-        runner.shutdown()
 
 
 def _finalize_task_if_needed(connection: object, task_id: str, finished_at: str) -> None:
@@ -591,3 +604,8 @@ def _now() -> str:
 def _is_inprocess_backend() -> bool:
     settings = get_settings()
     return settings.queue_backend == "inprocess"
+
+
+def _is_celery_backend() -> bool:
+    settings = get_settings()
+    return settings.queue_backend == "celery"

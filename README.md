@@ -327,10 +327,10 @@ Day 12-13：
 
 ### 4.2 当前未完成
 
-- 生产部署脚本与配置
-- PostgreSQL / Redis 生产化切换
-- 用户注册 / 登录与账号体系
-- 生产监控与告警
+- 生产环境的 Nginx/HTTPS 终态接入与域名发布
+- Celery 任务细粒度拆分与更完整重试/死信策略
+- 告警渠道（邮件/企业微信/Slack）对接
+- 账号体系的权限分层（RBAC）与审计策略
 - Playwright 运行依赖的安装引导与运行期环境探测优化
 
 ### 4.3 本轮已补充
@@ -341,18 +341,22 @@ Day 12-13：
 - 已补齐前端结果表分页、队列分页和 API Key 输入态
 - 已重做控制台界面，提升整体视觉与操作流
 - 已修复 Edge 下的部分排布稳定性问题，并优化前端实时刷新策略与渲染开销，提升页面流畅度
-- 已让 `PYMS_DB_URL` 真实参与数据库初始化（当前运行时明确支持 `sqlite:///...`）
-- 已支持 `PYMS_QUEUE_BACKEND=inprocess|external`，可切换为“API + 独立 worker”运行形态
+- 已让 `PYMS_DB_URL` 真实参与数据库初始化（支持 `sqlite:///...` 与 `postgresql://...`）
+- 已支持 `PYMS_QUEUE_BACKEND=inprocess|external|celery`
 - 已新增 `worker_main.py` 用于独立队列 worker 进程启动
+- 已新增 Celery 调度链路：`app/celery_app.py`、`app/celery_tasks.py`、`celery worker`、`celery beat`
+- 已新增运行环境探测与监控接口：`/v1/runtime/probe`、`/v1/metrics`
+- 已补充 Prometheus + Alertmanager + Docker Compose 生产部署模板
+- 已接入用户注册 / 登录 / 会话体系：`/v1/auth/register`、`/v1/auth/login`、`/v1/auth/logout`、`/v1/auth/me`
 
 ### 4.4 当前结论
 
-现在的仓库已经是“可本地访问的网页型控制台 MVP”，但还不是“可安全公网部署的生产系统”。
+现在的仓库已经从“本地原型 MVP”升级为“可部署版基础形态”：支持 PostgreSQL/Redis、Celery worker/beat、会话鉴权和监控探针。
 
 要达到最终目标，下一阶段必须继续完成：
-1. 鉴权与环境变量治理。
-2. PostgreSQL / Redis / Nginx 的部署链路。
-3. 前端完善、压测、监控与公网发布准备。
+1. Nginx / HTTPS / 域名与公网发布。
+2. Celery 任务策略深化（细粒度任务、死信、限流、退避）。
+3. 鉴权权限分层（RBAC）与生产审计闭环。
 
 ---
 
@@ -366,9 +370,13 @@ Day 12-13：
 - `PYMS_HOST`：监听地址，默认 `127.0.0.1`
 - `PYMS_PORT`：监听端口，默认 `8000`
 - `PYMS_API_KEY`：启用后，所有 `/v1/*` 业务接口需要 API Key
-- `PYMS_DB_URL`：当前用于声明目标数据库连接串，默认 `sqlite:///data/app.db`
+- `PYMS_AUTH_ENABLED`：是否启用注册/登录/会话鉴权，默认 `false`
+- `PYMS_SESSION_TTL_HOURS`：会话有效期（小时），默认 `24`
+- `PYMS_DB_URL`：数据库连接串，默认 `sqlite:///data/app.db`，部署建议 `postgresql://...`
 - `PYMS_REDIS_URL`：当前用于声明目标 Redis 连接串，默认 `redis://127.0.0.1:6379/0`
-- `PYMS_QUEUE_BACKEND`：队列运行模式，`inprocess`（默认，API 进程内线程）或 `external`（独立 worker 进程）
+- `PYMS_QUEUE_BACKEND`：队列运行模式，`inprocess`（默认）/`external`（手工 worker）/`celery`（生产建议）
+- `PYMS_QUEUE_BATCH_SIZE`：Celery 单次处理的最大队列项数量，默认 `20`
+- `PYMS_QUEUE_POLL_INTERVAL_SECONDS`：Celery beat 调度间隔秒数，默认 `2`
 - `PYMS_QUEUE_PAGE_SIZE`：队列接口默认分页大小
 - `PYMS_QUEUE_PAGE_SIZE_MAX`：队列接口最大分页大小
 - `PYMS_RESULT_PAGE_SIZE`：结果接口默认分页大小
@@ -387,7 +395,7 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-如果要切换为“API + 独立 worker”运行形态（为后续 Celery/Redis 迁移做过渡）：
+如果要切换为“API + 独立 worker”运行形态（不使用 Celery）：
 
 ```powershell
 $env:PYMS_QUEUE_BACKEND="external"
@@ -399,6 +407,23 @@ python main.py
 ```powershell
 $env:PYMS_QUEUE_BACKEND="external"
 python worker_main.py
+```
+
+如果要启用 Celery + Redis：
+
+```powershell
+$env:PYMS_QUEUE_BACKEND="celery"
+$env:PYMS_REDIS_URL="redis://127.0.0.1:6379/0"
+python main.py
+```
+
+另开两个终端启动 worker/beat：
+
+```powershell
+$env:PYMS_QUEUE_BACKEND="celery"
+$env:PYMS_REDIS_URL="redis://127.0.0.1:6379/0"
+celery -A app.celery_app:celery_app worker --loglevel=INFO
+celery -A app.celery_app:celery_app beat --loglevel=INFO
 ```
 
 如果要使用动态页面渲染模式，还需要额外安装 Playwright 浏览器：
@@ -517,6 +542,7 @@ Invoke-WebRequest `
 - Day 13 词云图接口与回退逻辑
 - Day 14 `renderer=browser` 任务配置与 worker 分发
 - Day 15 API Key 鉴权与队列分页响应结构
+- Day 16 会话鉴权（注册/登录/会话校验）
 
 执行方式：
 
@@ -539,15 +565,61 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 建议按下面顺序推进：
 
-1. 把 SQLite 进程内原型切换到 PostgreSQL / Redis 部署版。
-2. 把进程内队列切换到 Celery + Redis，并补 worker / beat / 重试策略。
-3. 补生产监控、告警、部署脚本和运行环境探测。
-4. 设计并接入用户注册、登录和会话体系。
+1. 在 `deploy/docker-compose.prod.yml` 基础上补 Nginx + HTTPS + 域名接入。
+2. 对 Celery 增加失败重试分级、死信队列与限流配置。
+3. 将 Alertmanager 默认接收器替换为真实告警渠道。
+4. 在当前会话鉴权基础上补 RBAC 与操作审计。
 
 ---
 
-## 9. 相关文档
+## 9. 部署与监控
+
+已提供以下部署资源：
+
+- `Dockerfile`
+- `deploy/docker-compose.prod.yml`
+- `deploy/monitoring/prometheus.yml`
+- `deploy/monitoring/alert_rules.yml`
+- `deploy/monitoring/alertmanager.yml`
+- `scripts/deploy.ps1`
+- `scripts/probe_runtime.ps1`
+
+生产启动示例：
+
+```powershell
+Copy-Item .env.production.example .env.production
+# 修改 .env.production 中密码和密钥后执行
+.\scripts\deploy.ps1 -Action up
+```
+
+运行探测：
+
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:8000/v1/runtime/probe
+Invoke-WebRequest -Uri http://127.0.0.1:8000/v1/metrics
+```
+
+---
+
+## 10. 相关文档
 
 - [API_SPEC.md](./API_SPEC.md)
 - [DATABASE_DDL.sql](./DATABASE_DDL.sql)
 - [WIREFRAME.md](./WIREFRAME.md)
+
+---
+
+## 11. 本机运行库补齐记录（2026-04-12）
+
+已补齐：
+
+- 系统 Python 已安装 `psycopg-binary==3.3.3`，`psycopg` 导入正常。
+- `myvenv` 中 `psycopg / psycopg-binary / celery / redis / playwright` 导入正常。
+- 已执行 `playwright install chromium`（在当前环境可执行）。
+- 已安装 PostgreSQL 16（服务：`postgresql-x64-16`，状态 `Running`）。
+- 已安装 Redis on Windows（服务：`Redis`，状态 `Running`）。
+
+已发现并处理：
+
+- `Memurai Developer` 安装失败（错误 `1603`，安装日志显示 `MsiSystemRebootPending=1` 与临时目录权限错误），因此改用 `Redis.Redis` 包完成 Redis 服务安装。
+- `psql.exe` 安装路径为 `C:\Program Files\PostgreSQL\16\bin\psql.exe`，若新终端未识别命令，请重新打开终端后再执行。

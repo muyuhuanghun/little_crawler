@@ -9,17 +9,19 @@ from pathlib import Path
 from typing import Any
 import uuid
 
+import redis
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.auth import get_session_user, login_user, logout_session, register_user
 from app.cleaning import export_results, list_results
 from app.command_engine import execute_command
 from app.config import get_settings
-from app.db import init_db
+from app.db import init_db, get_connection
 from app.errors import AppError, ERROR_MESSAGES
 from app.service import (
     DEFAULT_DEPTH,
@@ -38,6 +40,8 @@ from app.wordclouds import generate_wordcloud
 EVENT_STREAM_POLL_INTERVAL_SECONDS = 0.1
 EVENT_STREAM_IDLE_TIMEOUT_SECONDS = 5
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+SESSION_COOKIE_NAME = "pyms_session"
+REQUEST_COUNTERS: dict[tuple[str, str, str], int] = {}
 
 
 class SubmitTaskRequest(BaseModel):
@@ -72,6 +76,13 @@ class WordCloudRequest(BaseModel):
     top_n: int = Field(default=80, ge=10, le=200)
 
 
+class AuthRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=8, max_length=128)
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> Any:
     init_db()
@@ -85,6 +96,13 @@ def create_app() -> FastAPI:
     api.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @api.middleware("http")
+    async def collect_metrics(request: Request, call_next: Any) -> JSONResponse | StreamingResponse:
+        response = await call_next(request)
+        key = (request.method, request.url.path, str(response.status_code))
+        REQUEST_COUNTERS[key] = REQUEST_COUNTERS.get(key, 0) + 1
+        return response
+
+    @api.middleware("http")
     async def enforce_api_key(request: Request, call_next: Any) -> JSONResponse | StreamingResponse:
         if not _requires_api_key(request, settings):
             return await call_next(request)
@@ -96,9 +114,26 @@ def create_app() -> FastAPI:
             )
         return await call_next(request)
 
+    @api.middleware("http")
+    async def enforce_session_auth(request: Request, call_next: Any) -> JSONResponse | StreamingResponse:
+        if not _requires_session_auth(request, settings):
+            return await call_next(request)
+
+        token = _read_session_token(request)
+        user = get_session_user(token or "")
+        if user is None:
+            return JSONResponse(
+                status_code=401,
+                content=_error_payload(_request_id(request), 1004, "login required"),
+            )
+        request.state.user = user
+        return await call_next(request)
+
     @api.exception_handler(AppError)
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
         status_code = 400 if exc.code < 5000 else 500
+        if exc.code == 1004:
+            status_code = 401
         if exc.code == 2001:
             status_code = 404
         return JSONResponse(
@@ -122,13 +157,17 @@ def create_app() -> FastAPI:
 
     @api.get("/v1/health")
     async def health(request: Request) -> dict[str, Any]:
+        checks = _runtime_probe(settings)
         return _ok_payload(
             _request_id(request),
             {
-                "status": "ok",
+                "status": "ok" if checks["ok"] else "degraded",
                 "version": "0.1.0",
                 "environment": settings.app_env,
-                "auth": {"api_key_required": settings.api_key_enabled},
+                "auth": {
+                    "api_key_required": settings.api_key_enabled,
+                    "session_enabled": settings.auth_enabled,
+                },
                 "storage": {
                     "db_url": settings.db_url,
                     "redis_url": settings.redis_url,
@@ -136,13 +175,66 @@ def create_app() -> FastAPI:
                 "runtime": {
                     "queue_backend": settings.queue_backend,
                 },
+                "checks": checks["checks"],
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )
 
+    @api.get("/v1/runtime/probe")
+    async def runtime_probe(request: Request) -> dict[str, Any]:
+        checks = _runtime_probe(settings)
+        return _ok_payload(_request_id(request), checks)
+
+    @api.get("/v1/metrics")
+    async def metrics() -> PlainTextResponse:
+        return PlainTextResponse(_render_prometheus_metrics(), media_type="text/plain; version=0.0.4")
+
     @api.get("/", response_class=FileResponse)
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
+
+    @api.post("/v1/auth/register")
+    async def auth_register(payload: AuthRequest, request: Request) -> dict[str, Any]:
+        data = register_user(payload.username, payload.password)
+        return _ok_payload(_request_id(request), data, message="user registered")
+
+    @api.post("/v1/auth/login")
+    async def auth_login(payload: AuthRequest, request: Request) -> JSONResponse:
+        data = login_user(payload.username, payload.password)
+        response = JSONResponse(
+            status_code=200,
+            content=_ok_payload(_request_id(request), {"user": data["user"], "expires_at": data["expires_at"]}),
+        )
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=data["token"],
+            httponly=True,
+            secure=settings.app_env not in {"development", "test"},
+            samesite="lax",
+            max_age=settings.session_ttl_hours * 3600,
+            path="/",
+        )
+        return response
+
+    @api.post("/v1/auth/logout")
+    async def auth_logout(request: Request) -> JSONResponse:
+        token = _read_session_token(request)
+        if token:
+            logout_session(token)
+        response = JSONResponse(
+            status_code=200,
+            content=_ok_payload(_request_id(request), {"logged_out": True}),
+        )
+        response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+        return response
+
+    @api.get("/v1/auth/me")
+    async def auth_me(request: Request) -> dict[str, Any]:
+        token = _read_session_token(request)
+        user = get_session_user(token or "")
+        if user is None:
+            raise AppError(1004, "login required")
+        return _ok_payload(_request_id(request), {"user": user})
 
     @api.get("/v1/tasks")
     async def tasks(request: Request, task_id: str | None = None) -> dict[str, Any]:
@@ -267,6 +359,8 @@ def create_app() -> FastAPI:
         except AppError as exc:
             log_command(request_id, payload.command, exc.code, exc.message)
             status_code = 400 if exc.code < 5000 else 500
+            if exc.code == 1004:
+                status_code = 401
             if exc.code == 2001:
                 status_code = 404
             return JSONResponse(
@@ -292,7 +386,27 @@ def _requires_api_key(request: Request, settings: Any) -> bool:
     if not settings.api_key_enabled:
         return False
     path = request.url.path
-    if path == "/" or path == "/v1/health" or path.startswith("/static/"):
+    if (
+        path == "/"
+        or path in {"/v1/health", "/v1/metrics", "/v1/runtime/probe"}
+        or path.startswith("/static/")
+        or path.startswith("/v1/auth/")
+    ):
+        return False
+    return path.startswith("/v1/")
+
+
+def _requires_session_auth(request: Request, settings: Any) -> bool:
+    if not settings.auth_enabled:
+        return False
+    path = request.url.path
+    if (
+        path == "/"
+        or path in {"/v1/health", "/v1/metrics", "/v1/runtime/probe"}
+        or path.startswith("/static/")
+        or path.startswith("/v1/auth/register")
+        or path.startswith("/v1/auth/login")
+    ):
         return False
     return path.startswith("/v1/")
 
@@ -309,6 +423,21 @@ def _read_api_key(request: Request) -> str | None:
     query_api_key = request.query_params.get("api_key")
     if query_api_key and query_api_key.strip():
         return query_api_key.strip()
+    return None
+
+
+def _read_session_token(request: Request) -> str | None:
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token:
+            return token
+    x_session = request.headers.get("X-Session-Token")
+    if x_session and x_session.strip():
+        return x_session.strip()
+    cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if cookie_token and cookie_token.strip():
+        return cookie_token.strip()
     return None
 
 
@@ -343,3 +472,42 @@ def _sse_frame(event: str, data: dict[str, Any], event_id: int | None = None) ->
     lines.append(f"event: {event}")
     lines.append(f"data: {json.dumps(data, ensure_ascii=True)}")
     return "\n".join(lines) + "\n\n"
+
+
+def _runtime_probe(settings: Any) -> dict[str, Any]:
+    checks: dict[str, dict[str, Any]] = {}
+
+    try:
+        with get_connection() as connection:
+            connection.execute("SELECT 1")
+        checks["database"] = {"ok": True}
+    except Exception as exc:
+        checks["database"] = {"ok": False, "error": str(exc)}
+
+    try:
+        redis.Redis.from_url(settings.redis_url, socket_timeout=1.0).ping()
+        checks["redis"] = {"ok": True}
+    except Exception as exc:
+        checks["redis"] = {"ok": False, "error": str(exc)}
+
+    if settings.queue_backend == "celery":
+        checks["queue_backend"] = {"ok": checks["redis"]["ok"], "backend": "celery"}
+    elif settings.queue_backend == "inprocess":
+        checks["queue_backend"] = {"ok": True, "backend": "inprocess"}
+    else:
+        checks["queue_backend"] = {"ok": True, "backend": settings.queue_backend}
+
+    overall_ok = all(item.get("ok", False) for item in checks.values())
+    return {"ok": overall_ok, "checks": checks}
+
+
+def _render_prometheus_metrics() -> str:
+    lines = [
+        "# HELP pyms_http_requests_total Total HTTP requests by method/path/status.",
+        "# TYPE pyms_http_requests_total counter",
+    ]
+    for (method, path, status), count in sorted(REQUEST_COUNTERS.items()):
+        lines.append(
+            f'pyms_http_requests_total{{method="{method}",path="{path}",status="{status}"}} {count}'
+        )
+    return "\n".join(lines) + "\n"

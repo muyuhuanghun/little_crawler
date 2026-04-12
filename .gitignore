@@ -4,3 +4,4 @@ data/
 tests/.tmp/
 myvenv/
 myvenv_msys2_backup/
+.env.production

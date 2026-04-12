@@ -92,14 +92,14 @@ class DayFourteenDayFifteenTests(unittest.TestCase):
         self.assertEqual(row["value"], 1)
         self.assertTrue(target_path.exists())
 
-    def test_db_url_rejects_unsupported_scheme(self) -> None:
+    def test_db_url_postgres_requires_driver_or_runtime(self) -> None:
         db.DB_PATH = None
         with patch.dict(
             os.environ,
             {"PYMS_DB_URL": "postgresql://user:password@127.0.0.1:5432/pyms"},
             clear=False,
         ):
-            with self.assertRaisesRegex(ValueError, "Unsupported PYMS_DB_URL scheme"):
+            with self.assertRaises((RuntimeError, OSError, ConnectionError)):
                 db.get_connection()
 
     def test_health_reports_queue_backend(self) -> None:

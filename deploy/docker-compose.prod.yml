@@ -1,0 +1,117 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: pyms-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pyms}
+      POSTGRES_USER: ${POSTGRES_USER:-pyms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pyms}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pyms-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pyms} -d ${POSTGRES_DB:-pyms}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: pyms-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - pyms-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: pyms-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - ../.env.production
+    environment:
+      PYMS_HOST: 0.0.0.0
+      PYMS_PORT: 8000
+      PYMS_QUEUE_BACKEND: celery
+      PYMS_DB_URL: postgresql://${POSTGRES_USER:-pyms}:${POSTGRES_PASSWORD:-pyms}@postgres:5432/${POSTGRES_DB:-pyms}
+      PYMS_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    command: ["python", "main.py"]
+
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: pyms-celery-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - ../.env.production
+    environment:
+      PYMS_QUEUE_BACKEND: celery
+      PYMS_DB_URL: postgresql://${POSTGRES_USER:-pyms}:${POSTGRES_PASSWORD:-pyms}@postgres:5432/${POSTGRES_DB:-pyms}
+      PYMS_REDIS_URL: redis://redis:6379/0
+    command: ["celery", "-A", "app.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+
+  celery-beat:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: pyms-celery-beat
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - ../.env.production
+    environment:
+      PYMS_QUEUE_BACKEND: celery
+      PYMS_DB_URL: postgresql://${POSTGRES_USER:-pyms}:${POSTGRES_PASSWORD:-pyms}@postgres:5432/${POSTGRES_DB:-pyms}
+      PYMS_REDIS_URL: redis://redis:6379/0
+    command: ["celery", "-A", "app.celery_app:celery_app", "beat", "--loglevel=INFO"]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: pyms-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - app
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: pyms-alertmanager
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+
+volumes:
+  pyms-postgres-data:
+  pyms-redis-data:

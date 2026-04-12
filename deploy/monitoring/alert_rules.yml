@@ -1,0 +1,20 @@
+groups:
+  - name: pyms-rules
+    rules:
+      - alert: PyMSAppDown
+        expr: up{job="pyms-app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PyMS app is down"
+          description: "Prometheus cannot scrape PyMS app metrics endpoint for more than 1 minute."
+
+      - alert: PyMSHigh5xxRate
+        expr: increase(pyms_http_requests_total{path!="/v1/metrics",status=~"5.."}[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PyMS 5xx spike detected"
+          description: "More than 5 server errors in the last 5 minutes."

@@ -143,7 +143,7 @@ def list_tasks() -> list[dict[str, Any]]:
                 total_count, done_count, failed_count, clean_done_count,
                 created_at, started_at, ended_at
             FROM tasks
-            ORDER BY created_at DESC, rowid DESC
+            ORDER BY created_at DESC, task_id DESC
             """
         ).fetchall()
     return [_serialize_task(_row_to_task(row)) for row in rows]
