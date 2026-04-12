@@ -12,6 +12,7 @@ class Settings:
     api_key: str | None
     db_url: str
     redis_url: str
+    queue_backend: str
     queue_page_size_default: int
     queue_page_size_max: int
     result_page_size_default: int
@@ -31,6 +32,7 @@ def get_settings() -> Settings:
         db_url=os.getenv("PYMS_DB_URL", "sqlite:///data/app.db").strip() or "sqlite:///data/app.db",
         redis_url=os.getenv("PYMS_REDIS_URL", "redis://127.0.0.1:6379/0").strip()
         or "redis://127.0.0.1:6379/0",
+        queue_backend=_read_choice("PYMS_QUEUE_BACKEND", "inprocess", {"inprocess", "external"}),
         queue_page_size_default=_read_int("PYMS_QUEUE_PAGE_SIZE", 20, minimum=1, maximum=100),
         queue_page_size_max=_read_int("PYMS_QUEUE_PAGE_SIZE_MAX", 100, minimum=1, maximum=500),
         result_page_size_default=_read_int("PYMS_RESULT_PAGE_SIZE", 20, minimum=1, maximum=100),
@@ -53,4 +55,15 @@ def _read_int(name: str, default: int, minimum: int, maximum: int) -> int:
     value = int(raw.strip())
     if value < minimum or value > maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _read_choice(name: str, default: str, choices: set[str]) -> str:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value not in choices:
+        allowed = ", ".join(sorted(choices))
+        raise ValueError(f"{name} must be one of: {allowed}")
     return value

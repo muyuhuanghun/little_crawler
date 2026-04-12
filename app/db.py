@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+from app.config import get_settings
 
 
-DB_PATH = Path("data/app.db")
+DB_PATH: Path | None = None
 
 
 SCHEMA = """
@@ -90,8 +93,12 @@ CREATE TABLE IF NOT EXISTS clean_items (
 
 
 def get_connection() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(str(DB_PATH))
+    db_path = _resolve_db_path()
+    if db_path == Path(":memory:"):
+        connection = sqlite3.connect(":memory:")
+    else:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(str(db_path))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.executescript(SCHEMA)
@@ -104,6 +111,36 @@ def get_connection() -> sqlite3.Connection:
 def init_db() -> None:
     with get_connection() as connection:
         pass
+
+
+def _resolve_db_path() -> Path:
+    if DB_PATH is not None:
+        return DB_PATH
+
+    settings = get_settings()
+    parsed = urlsplit(settings.db_url)
+    if parsed.scheme != "sqlite":
+        raise ValueError(
+            f"Unsupported PYMS_DB_URL scheme '{parsed.scheme}'. "
+            "Current runtime only supports sqlite:///... for now."
+        )
+
+    raw_path = unquote(parsed.path or "")
+    if not raw_path:
+        raise ValueError("PYMS_DB_URL must include a sqlite path, for example sqlite:///data/app.db")
+    if raw_path == "/:memory:":
+        return Path(":memory:")
+
+    # Normalize windows absolute path represented as /C:/...
+    if len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
+        normalized = raw_path[1:]
+    elif raw_path.startswith("//"):
+        normalized = raw_path
+    elif raw_path.startswith("/"):
+        normalized = raw_path[1:]
+    else:
+        normalized = raw_path
+    return Path(normalized)
 
 
 def _ensure_queue_items_hop_count(connection: sqlite3.Connection) -> None:

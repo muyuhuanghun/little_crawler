@@ -14,6 +14,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from app.cleaning import RawItem, save_raw_items
+from app.config import get_settings
 from app.db import get_connection
 from app.errors import AppError
 from app.security import assert_public_network_target, validate_target_url
@@ -148,6 +149,14 @@ def _build_crawl_result(
 _fetch_url: Callable[[str, str], CrawlResult] = fetch_url
 _runner: QueueRunner | None = None
 _runner_lock = threading.Lock()
+
+
+class NoopQueueRunner:
+    def notify(self) -> None:
+        return
+
+    def shutdown(self) -> None:
+        return
 
 
 class QueueRunner:
@@ -397,15 +406,24 @@ class QueueRunner:
             )
 
 
-def get_queue_runner() -> QueueRunner:
+def get_queue_runner() -> QueueRunner | NoopQueueRunner:
     global _runner
+    if not _is_inprocess_backend():
+        return NoopQueueRunner()
     with _runner_lock:
         if _runner is None:
             _runner = QueueRunner()
         return _runner
 
 
+def start_queue_runtime() -> None:
+    if _is_inprocess_backend():
+        get_queue_runner()
+
+
 def notify_queue_runner() -> None:
+    if not _is_inprocess_backend():
+        return
     get_queue_runner().notify()
 
 
@@ -426,6 +444,17 @@ def shutdown_queue_runner() -> None:
             return
         _runner.shutdown()
         _runner = None
+
+
+def run_queue_worker_forever() -> None:
+    runner = QueueRunner()
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        runner.shutdown()
 
 
 def _finalize_task_if_needed(connection: object, task_id: str, finished_at: str) -> None:
@@ -557,3 +586,8 @@ def _normalize_encoding(value: str | None) -> str | None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _is_inprocess_backend() -> bool:
+    settings = get_settings()
+    return settings.queue_backend == "inprocess"

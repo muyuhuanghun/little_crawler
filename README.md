@@ -340,6 +340,10 @@ Day 12-13：
 - 已支持队列分页与按状态汇总计数
 - 已补齐前端结果表分页、队列分页和 API Key 输入态
 - 已重做控制台界面，提升整体视觉与操作流
+- 已修复 Edge 下的部分排布稳定性问题，并优化前端实时刷新策略与渲染开销，提升页面流畅度
+- 已让 `PYMS_DB_URL` 真实参与数据库初始化（当前运行时明确支持 `sqlite:///...`）
+- 已支持 `PYMS_QUEUE_BACKEND=inprocess|external`，可切换为“API + 独立 worker”运行形态
+- 已新增 `worker_main.py` 用于独立队列 worker 进程启动
 
 ### 4.4 当前结论
 
@@ -364,6 +368,7 @@ Day 12-13：
 - `PYMS_API_KEY`：启用后，所有 `/v1/*` 业务接口需要 API Key
 - `PYMS_DB_URL`：当前用于声明目标数据库连接串，默认 `sqlite:///data/app.db`
 - `PYMS_REDIS_URL`：当前用于声明目标 Redis 连接串，默认 `redis://127.0.0.1:6379/0`
+- `PYMS_QUEUE_BACKEND`：队列运行模式，`inprocess`（默认，API 进程内线程）或 `external`（独立 worker 进程）
 - `PYMS_QUEUE_PAGE_SIZE`：队列接口默认分页大小
 - `PYMS_QUEUE_PAGE_SIZE_MAX`：队列接口最大分页大小
 - `PYMS_RESULT_PAGE_SIZE`：结果接口默认分页大小
@@ -380,6 +385,20 @@ $env:PYMS_PORT="8000"
 & .\myvenv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 python main.py
+```
+
+如果要切换为“API + 独立 worker”运行形态（为后续 Celery/Redis 迁移做过渡）：
+
+```powershell
+$env:PYMS_QUEUE_BACKEND="external"
+python main.py
+```
+
+另开一个终端启动 worker：
+
+```powershell
+$env:PYMS_QUEUE_BACKEND="external"
+python worker_main.py
 ```
 
 如果要使用动态页面渲染模式，还需要额外安装 Playwright 浏览器：

@@ -31,7 +31,7 @@ from app.service import (
     log_command,
     submit_task,
 )
-from app.worker import get_queue_runner
+from app.worker import start_queue_runtime
 from app.wordclouds import generate_wordcloud
 
 
@@ -75,7 +75,7 @@ class WordCloudRequest(BaseModel):
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> Any:
     init_db()
-    get_queue_runner()
+    start_queue_runtime()
     yield
 
 
@@ -132,6 +132,9 @@ def create_app() -> FastAPI:
                 "storage": {
                     "db_url": settings.db_url,
                     "redis_url": settings.redis_url,
+                },
+                "runtime": {
+                    "queue_backend": settings.queue_backend,
                 },
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },

@@ -1,4 +1,6 @@
 const STORAGE_KEY = "pyms.apiKey";
+const REALTIME_REFRESH_MIN_INTERVAL_MS = 700;
+const MAX_EVENT_LOG_LINES = 120;
 const state = {
   selectedTaskId: null,
   eventSource: null,
@@ -13,6 +15,10 @@ const state = {
   resultsView: "clean",
   resultsQuery: "",
   resultsTotal: 0,
+  realtimeRefreshTimer: null,
+  pendingRealtimeRefresh: false,
+  refreshInFlight: false,
+  lastRealtimeRefreshAt: 0,
 };
 
 const elements = {
@@ -439,10 +445,9 @@ function startEventStream(taskId) {
   elements.streamStatus.textContent = "连接中";
   state.eventSource.onopen = () => { elements.streamStatus.textContent = "已连接"; };
   state.eventSource.onerror = () => { elements.streamStatus.textContent = "连接结束"; };
-  state.eventSource.onmessage = async (event) => {
+  state.eventSource.onmessage = (event) => {
     appendLogLine(JSON.parse(event.data));
-    await loadTasks();
-    await refreshSelectedTask();
+    scheduleRealtimeRefresh();
   };
 }
 
@@ -451,6 +456,41 @@ function appendLogLine(payload) {
   line.className = "log-line";
   line.textContent = `[${payload.timestamp}] ${payload.event_type} ${JSON.stringify(payload.payload)}`;
   elements.eventsLog.prepend(line);
+  while (elements.eventsLog.children.length > MAX_EVENT_LOG_LINES) {
+    elements.eventsLog.removeChild(elements.eventsLog.lastElementChild);
+  }
+}
+
+function scheduleRealtimeRefresh() {
+  if (state.realtimeRefreshTimer) {
+    state.pendingRealtimeRefresh = true;
+    return;
+  }
+  const elapsed = Date.now() - state.lastRealtimeRefreshAt;
+  const delay = Math.max(0, REALTIME_REFRESH_MIN_INTERVAL_MS - elapsed);
+  state.realtimeRefreshTimer = window.setTimeout(() => {
+    state.realtimeRefreshTimer = null;
+    void runRealtimeRefresh();
+  }, delay);
+}
+
+async function runRealtimeRefresh() {
+  if (state.refreshInFlight) {
+    state.pendingRealtimeRefresh = true;
+    return;
+  }
+  state.refreshInFlight = true;
+  state.lastRealtimeRefreshAt = Date.now();
+  try {
+    await loadTasks();
+    await refreshSelectedTask();
+  } finally {
+    state.refreshInFlight = false;
+    if (state.pendingRealtimeRefresh) {
+      state.pendingRealtimeRefresh = false;
+      scheduleRealtimeRefresh();
+    }
+  }
 }
 
 function resetWordcloudPreview() {

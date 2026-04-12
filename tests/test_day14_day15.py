@@ -15,7 +15,7 @@ from app.cleaning import RawItem
 from app.command_engine import execute_command
 from app.server import create_app
 from app.service import get_task
-from app.worker import CrawlResult, reset_fetcher, set_fetcher, shutdown_queue_runner
+from app.worker import CrawlResult, NoopQueueRunner, get_queue_runner, reset_fetcher, set_fetcher, shutdown_queue_runner
 
 
 class DayFourteenDayFifteenTests(unittest.TestCase):
@@ -82,6 +82,43 @@ class DayFourteenDayFifteenTests(unittest.TestCase):
         self.assertEqual(len(body["data"]["items"]), 2)
         self.assertIn("done", body["data"]["counts_by_state"])
         self.assertIn("pending", body["data"]["counts_by_state"])
+
+    def test_db_url_sqlite_path_is_used_when_db_path_not_overridden(self) -> None:
+        target_path = self.temp_dir / "env_app.db"
+        db.DB_PATH = None
+        with patch.dict(os.environ, {"PYMS_DB_URL": f"sqlite:///{target_path.as_posix()}"}, clear=False):
+            with db.get_connection() as connection:
+                row = connection.execute("SELECT 1 AS value").fetchone()
+        self.assertEqual(row["value"], 1)
+        self.assertTrue(target_path.exists())
+
+    def test_db_url_rejects_unsupported_scheme(self) -> None:
+        db.DB_PATH = None
+        with patch.dict(
+            os.environ,
+            {"PYMS_DB_URL": "postgresql://user:password@127.0.0.1:5432/pyms"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "Unsupported PYMS_DB_URL scheme"):
+                db.get_connection()
+
+    def test_health_reports_queue_backend(self) -> None:
+        with patch.dict(os.environ, {"PYMS_QUEUE_BACKEND": "external"}, clear=False):
+            with TestClient(create_app()) as client:
+                response = client.get("/v1/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"]["runtime"]["queue_backend"], "external")
+
+    def test_external_queue_backend_uses_noop_runner(self) -> None:
+        shutdown_queue_runner()
+        with patch.dict(os.environ, {"PYMS_QUEUE_BACKEND": "external"}, clear=False):
+            runner = get_queue_runner()
+            self.assertIsInstance(runner, NoopQueueRunner)
+            started = execute_command("crawl start url=https://example.com/news limit=1 depth=1")
+            task = get_task(started["task_id"])
+        self.assertEqual(task["status"], "running")
+        self.assertEqual(task["done_count"], 0)
+        self.assertEqual(task["failed_count"], 0)
 
     def _wait_for_task_count(self, task_id: str, expected_total: int, timeout_seconds: float = 3) -> None:
         deadline = time.time() + timeout_seconds
