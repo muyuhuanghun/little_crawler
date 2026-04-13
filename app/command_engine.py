@@ -39,7 +39,6 @@ def execute_command(command: str) -> dict[str, Any]:
         return _handle_queue_list(params)
     if head == ("clean", "run"):
         return _handle_clean_run(params)
-
     raise AppError(1003)
 
 
