@@ -17,7 +17,8 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import get_session_user, login_user, logout_session, register_user
+from app.audit import list_audit_logs, write_audit_log
+from app.auth import get_session_user, list_users, login_user, logout_session, register_user, set_user_role
 from app.cleaning import export_results, list_results
 from app.command_engine import execute_command
 from app.config import get_settings
@@ -83,6 +84,12 @@ class AuthRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+class RoleUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = Field(min_length=1, max_length=32)
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> Any:
     init_db()
@@ -96,10 +103,30 @@ def create_app() -> FastAPI:
     api.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @api.middleware("http")
+    async def attach_request_id(request: Request, call_next: Any) -> JSONResponse | StreamingResponse:
+        request.state.request_id = request.headers.get("X-Request-Id") or f"req_{uuid.uuid4().hex[:12]}"
+        return await call_next(request)
+
+    @api.middleware("http")
     async def collect_metrics(request: Request, call_next: Any) -> JSONResponse | StreamingResponse:
         response = await call_next(request)
         key = (request.method, request.url.path, str(response.status_code))
         REQUEST_COUNTERS[key] = REQUEST_COUNTERS.get(key, 0) + 1
+        if settings.audit_log_enabled and _requires_audit_log(request):
+            try:
+                write_audit_log(
+                    user=getattr(request.state, "user", None),
+                    action=f"{request.method} {request.url.path}",
+                    resource=request.url.path,
+                    status_code=int(response.status_code),
+                    request_id=_request_id(request),
+                    source_ip=(request.client.host if request.client else None),
+                    user_agent=request.headers.get("User-Agent"),
+                    payload={"query": dict(request.query_params)},
+                )
+            except Exception:
+                # Audit log must not break main request path.
+                pass
         return response
 
     @api.middleware("http")
@@ -127,6 +154,38 @@ def create_app() -> FastAPI:
                 content=_error_payload(_request_id(request), 1004, "login required"),
             )
         request.state.user = user
+        return await call_next(request)
+
+    @api.middleware("http")
+    async def enforce_rbac(request: Request, call_next: Any) -> JSONResponse | StreamingResponse:
+        if not settings.auth_enabled or not request.url.path.startswith("/v1/"):
+            return await call_next(request)
+        if not _requires_session_auth(request, settings):
+            return await call_next(request)
+
+        user = getattr(request.state, "user", None)
+        if user is None:
+            token = _read_session_token(request)
+            user = get_session_user(token or "")
+            if user is not None:
+                request.state.user = user
+        if user is None:
+            return JSONResponse(
+                status_code=401,
+                content=_error_payload(_request_id(request), 1004, "login required"),
+            )
+        role = (user or {}).get("role", "")
+        required = _required_role_for_request(request)
+        if required == "admin" and role != "admin":
+            return JSONResponse(
+                status_code=403,
+                content=_error_payload(_request_id(request), 1004, "admin role required"),
+            )
+        if required == "operator" and role not in {"operator", "admin"}:
+            return JSONResponse(
+                status_code=403,
+                content=_error_payload(_request_id(request), 1004, "operator role required"),
+            )
         return await call_next(request)
 
     @api.exception_handler(AppError)
@@ -235,6 +294,15 @@ def create_app() -> FastAPI:
         if user is None:
             raise AppError(1004, "login required")
         return _ok_payload(_request_id(request), {"user": user})
+
+    @api.get("/v1/auth/users")
+    async def auth_users(request: Request) -> dict[str, Any]:
+        return _ok_payload(_request_id(request), {"items": list_users()})
+
+    @api.post("/v1/auth/users/{user_id}/role")
+    async def auth_set_role(user_id: int, payload: RoleUpdateRequest, request: Request) -> dict[str, Any]:
+        updated = set_user_role(user_id=user_id, role=payload.role)
+        return _ok_payload(_request_id(request), updated, message="role updated")
 
     @api.get("/v1/tasks")
     async def tasks(request: Request, task_id: str | None = None) -> dict[str, Any]:
@@ -371,6 +439,10 @@ def create_app() -> FastAPI:
         log_command(request_id, payload.command, 0, "ok")
         return _ok_payload(request_id, data)
 
+    @api.get("/v1/audit/logs")
+    async def audit_logs(request: Request, page: int = 1, page_size: int = 50) -> dict[str, Any]:
+        return _ok_payload(_request_id(request), list_audit_logs(page=page, page_size=page_size))
+
     return api
 
 
@@ -444,6 +516,9 @@ def _read_session_token(request: Request) -> str | None:
 def _request_id(request: Request | None) -> str:
     if request is None:
         return f"req_{uuid.uuid4().hex[:12]}"
+    state_request_id = getattr(request.state, "request_id", None)
+    if state_request_id:
+        return state_request_id
     return request.headers.get("X-Request-Id") or f"req_{uuid.uuid4().hex[:12]}"
 
 
@@ -511,3 +586,28 @@ def _render_prometheus_metrics() -> str:
             f'pyms_http_requests_total{{method="{method}",path="{path}",status="{status}"}} {count}'
         )
     return "\n".join(lines) + "\n"
+
+
+def _requires_audit_log(request: Request) -> bool:
+    path = request.url.path
+    if path == "/" or path.startswith("/static/"):
+        return False
+    if path in {"/v1/health", "/v1/metrics", "/v1/runtime/probe"}:
+        return False
+    return path.startswith("/v1/")
+
+
+def _required_role_for_request(request: Request) -> str:
+    path = request.url.path
+    method = request.method.upper()
+
+    if path.startswith("/v1/auth/users") or path.startswith("/v1/audit/logs"):
+        return "admin"
+
+    if method in {"GET", "HEAD", "OPTIONS"}:
+        return "viewer"
+
+    if path.startswith("/v1/auth/logout"):
+        return "viewer"
+
+    return "operator"

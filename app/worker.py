@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 from urllib.parse import urljoin
 
@@ -195,16 +195,18 @@ def process_next_queue_item_once() -> bool:
                 q.task_id,
                 q.url,
                 q.hop_count,
+                q.retry_count,
                 t.limit_count,
                 t.depth,
                 t.fetch_mode
             FROM queue_items q
             JOIN tasks t ON t.task_id = q.task_id
             WHERE t.status = ? AND q.state = 'pending'
+              AND (q.next_run_at IS NULL OR q.next_run_at <= ?)
             ORDER BY q.priority DESC, q.id ASC
             LIMIT 1
             """,
-            (TaskStatus.RUNNING.value,),
+            (TaskStatus.RUNNING.value, _now()),
         ).fetchone()
 
         if row is None:
@@ -225,7 +227,13 @@ def process_next_queue_item_once() -> bool:
     try:
         result = _fetch_url(row["url"], row["fetch_mode"])
     except Exception as exc:
-        _mark_item_failed(row["task_id"], row["id"], row["url"], str(exc))
+        _mark_item_retry_or_failed(
+            task_id=row["task_id"],
+            queue_item_id=row["id"],
+            url=row["url"],
+            retry_count=int(row["retry_count"]),
+            error_message=str(exc),
+        )
         return True
 
     _mark_item_done(
@@ -312,8 +320,19 @@ def _mark_item_done(
         _finalize_task_if_needed(connection, task_id, now)
 
 
-def _mark_item_failed(task_id: str, queue_item_id: int, url: str, error_message: str) -> None:
+def _mark_item_retry_or_failed(
+    task_id: str,
+    queue_item_id: int,
+    url: str,
+    retry_count: int,
+    error_message: str,
+) -> None:
     now = _now()
+    settings = get_settings()
+    max_attempts = max(0, int(settings.queue_retry_max_attempts))
+    next_retry_count = int(retry_count) + 1
+    should_retry = next_retry_count <= max_attempts
+
     with get_connection() as connection:
         task = connection.execute(
             "SELECT status FROM tasks WHERE task_id = ?",
@@ -332,13 +351,54 @@ def _mark_item_failed(task_id: str, queue_item_id: int, url: str, error_message:
             )
             return
 
+        if should_retry:
+            delay_seconds = _compute_retry_delay_seconds(next_retry_count)
+            next_run_iso = (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)).isoformat()
+            connection.execute(
+                """
+                UPDATE queue_items
+                SET state = 'pending', retry_count = ?, next_run_at = ?, updated_at = ?, last_error = ?
+                WHERE id = ?
+                """,
+                (next_retry_count, next_run_iso, now, error_message, queue_item_id),
+            )
+            _insert_event(
+                connection,
+                task_id,
+                "crawl_item_retry_scheduled",
+                {
+                    "url": url,
+                    "error": error_message,
+                    "retry_count": next_retry_count,
+                    "next_run_at": next_run_iso,
+                },
+                now,
+            )
+            return
+
         connection.execute(
             """
             UPDATE queue_items
-            SET state = 'failed', updated_at = ?, last_error = ?
+            SET state = 'failed', retry_count = ?, next_run_at = NULL, updated_at = ?, last_error = ?
             WHERE id = ?
             """,
-            (now, error_message, queue_item_id),
+            (next_retry_count, now, error_message, queue_item_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO dead_letters (
+                task_id, queue_item_id, url, retry_count, error_message, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                queue_item_id,
+                url,
+                next_retry_count,
+                error_message,
+                json.dumps({"task_id": task_id, "url": url, "final": True}, ensure_ascii=True),
+                now,
+            ),
         )
         connection.execute(
             """
@@ -352,7 +412,7 @@ def _mark_item_failed(task_id: str, queue_item_id: int, url: str, error_message:
             connection,
             task_id,
             "crawl_item_failed",
-            {"url": url, "error": error_message},
+            {"url": url, "error": error_message, "retry_count": next_retry_count},
             now,
         )
         _finalize_task_if_needed(connection, task_id, now)
@@ -609,3 +669,11 @@ def _is_inprocess_backend() -> bool:
 def _is_celery_backend() -> bool:
     settings = get_settings()
     return settings.queue_backend == "celery"
+
+
+def _compute_retry_delay_seconds(retry_count: int) -> float:
+    settings = get_settings()
+    base = float(settings.queue_retry_backoff_base_seconds)
+    maximum = float(settings.queue_retry_backoff_max_seconds)
+    exponential = base * (2 ** max(0, int(retry_count) - 1))
+    return min(maximum, exponential)

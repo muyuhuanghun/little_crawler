@@ -15,8 +15,14 @@ class Settings:
     queue_backend: str
     queue_batch_size: int
     queue_poll_interval_seconds: float
+    queue_retry_max_attempts: int
+    queue_retry_backoff_base_seconds: float
+    queue_retry_backoff_max_seconds: float
+    celery_queue_drain_rate_limit: str | None
+    celery_item_rate_limit: str | None
     auth_enabled: bool
     session_ttl_hours: int
+    audit_log_enabled: bool
     queue_page_size_default: int
     queue_page_size_max: int
     result_page_size_default: int
@@ -39,8 +45,24 @@ def get_settings() -> Settings:
         queue_backend=_read_choice("PYMS_QUEUE_BACKEND", "inprocess", {"inprocess", "external", "celery"}),
         queue_batch_size=_read_int("PYMS_QUEUE_BATCH_SIZE", 20, minimum=1, maximum=500),
         queue_poll_interval_seconds=_read_float("PYMS_QUEUE_POLL_INTERVAL_SECONDS", 2.0, minimum=0.2, maximum=30),
+        queue_retry_max_attempts=_read_int("PYMS_QUEUE_RETRY_MAX_ATTEMPTS", 2, minimum=0, maximum=20),
+        queue_retry_backoff_base_seconds=_read_float(
+            "PYMS_QUEUE_RETRY_BACKOFF_BASE_SECONDS",
+            0.5,
+            minimum=0.1,
+            maximum=60,
+        ),
+        queue_retry_backoff_max_seconds=_read_float(
+            "PYMS_QUEUE_RETRY_BACKOFF_MAX_SECONDS",
+            8.0,
+            minimum=0.1,
+            maximum=600,
+        ),
+        celery_queue_drain_rate_limit=_read_optional("PYMS_CELERY_QUEUE_DRAIN_RATE_LIMIT"),
+        celery_item_rate_limit=_read_optional("PYMS_CELERY_ITEM_RATE_LIMIT"),
         auth_enabled=_read_bool("PYMS_AUTH_ENABLED", False),
         session_ttl_hours=_read_int("PYMS_SESSION_TTL_HOURS", 24, minimum=1, maximum=168),
+        audit_log_enabled=_read_bool("PYMS_AUDIT_LOG_ENABLED", True),
         queue_page_size_default=_read_int("PYMS_QUEUE_PAGE_SIZE", 20, minimum=1, maximum=100),
         queue_page_size_max=_read_int("PYMS_QUEUE_PAGE_SIZE_MAX", 100, minimum=1, maximum=500),
         result_page_size_default=_read_int("PYMS_RESULT_PAGE_SIZE", 20, minimum=1, maximum=100),

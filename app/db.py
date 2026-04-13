@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'operator',
     created_at TEXT NOT NULL
 );
 
@@ -110,6 +111,34 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT NOT NULL,
     revoked_at TEXT,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS dead_letters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    queue_item_id INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    retry_count INTEGER NOT NULL,
+    error_message TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    username TEXT,
+    role TEXT,
+    action TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    status_code INTEGER NOT NULL,
+    request_id TEXT NOT NULL,
+    source_ip TEXT,
+    user_agent TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 """
 
@@ -200,6 +229,7 @@ POSTGRES_SCHEMA_STATEMENTS = [
         id BIGSERIAL PRIMARY KEY,
         username TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'operator',
         created_at TIMESTAMPTZ NOT NULL
     )
     """,
@@ -213,9 +243,40 @@ POSTGRES_SCHEMA_STATEMENTS = [
         revoked_at TIMESTAMPTZ
     )
     """,
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'operator'",
+    """
+    CREATE TABLE IF NOT EXISTS dead_letters (
+        id BIGSERIAL PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+        queue_item_id BIGINT NOT NULL,
+        url TEXT NOT NULL,
+        retry_count INTEGER NOT NULL,
+        error_message TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS audit_logs (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+        username TEXT,
+        role TEXT,
+        action TEXT NOT NULL,
+        resource TEXT NOT NULL,
+        status_code INTEGER NOT NULL,
+        request_id TEXT NOT NULL,
+        source_ip TEXT,
+        user_agent TEXT,
+        payload_json TEXT,
+        created_at TIMESTAMPTZ NOT NULL
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_event_logs_task_id_id ON event_logs(task_id, id)",
     "CREATE INDEX IF NOT EXISTS idx_queue_items_task_state ON queue_items(task_id, state)",
     "CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_dead_letters_task_created ON dead_letters(task_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC)",
 ]
 
 
@@ -293,6 +354,8 @@ def _initialize_schema(backend: str, target: str) -> None:
             _ensure_queue_items_hop_count(connection)
             _ensure_results_tables(connection)
             _ensure_auth_tables(connection)
+            _ensure_dead_letters_table(connection)
+            _ensure_audit_table(connection)
             return
         for statement in POSTGRES_SCHEMA_STATEMENTS:
             connection.execute(statement)
@@ -447,10 +510,18 @@ def _ensure_auth_tables(connection: DatabaseConnection) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'operator',
                 created_at TEXT NOT NULL
             )
             """
         )
+    else:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "role" not in columns:
+            connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'operator'")
     if "sessions" not in tables:
         connection.execute(
             """
@@ -465,3 +536,59 @@ def _ensure_auth_tables(connection: DatabaseConnection) -> None:
             )
             """
         )
+
+
+def _ensure_dead_letters_table(connection: DatabaseConnection) -> None:
+    tables = {
+        row["name"]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "dead_letters" in tables:
+        return
+    connection.execute(
+        """
+        CREATE TABLE dead_letters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            queue_item_id INTEGER NOT NULL,
+            url TEXT NOT NULL,
+            retry_count INTEGER NOT NULL,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
+def _ensure_audit_table(connection: DatabaseConnection) -> None:
+    tables = {
+        row["name"]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "audit_logs" in tables:
+        return
+    connection.execute(
+        """
+        CREATE TABLE audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            role TEXT,
+            action TEXT NOT NULL,
+            resource TEXT NOT NULL,
+            status_code INTEGER NOT NULL,
+            request_id TEXT NOT NULL,
+            source_ip TEXT,
+            user_agent TEXT,
+            payload_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+        )
+        """
+    )

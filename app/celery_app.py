@@ -21,6 +21,10 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_default_queue="pyms-default",
+    task_routes={
+        "app.celery_tasks.process_queue_batch": {"queue": "pyms-scheduler"},
+        "app.celery_tasks.process_queue_item_once": {"queue": "pyms-worker"},
+    },
     beat_schedule={
         "pyms-queue-drain": {
             "task": "app.celery_tasks.process_queue_batch",

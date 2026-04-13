@@ -14,6 +14,7 @@ from app.errors import AppError
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,64}$")
 PBKDF2_ITERATIONS = 240_000
+ROLE_CHOICES = {"viewer", "operator", "admin"}
 
 
 def register_user(username: str, password: str) -> dict[str, Any]:
@@ -23,6 +24,8 @@ def register_user(username: str, password: str) -> dict[str, Any]:
     now = _now()
 
     with get_connection() as connection:
+        count_row = connection.execute("SELECT COUNT(*) AS total FROM users").fetchone()
+        assigned_role = "admin" if int(count_row["total"]) == 0 else "operator"
         existing = connection.execute(
             "SELECT id FROM users WHERE username = ?",
             (normalized_username,),
@@ -31,12 +34,12 @@ def register_user(username: str, password: str) -> dict[str, Any]:
             raise AppError(1001, "username already exists")
         connection.execute(
             """
-            INSERT INTO users (username, password_hash, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO users (username, password_hash, role, created_at)
+            VALUES (?, ?, ?, ?)
             """,
-            (normalized_username, password_hash, now),
+            (normalized_username, password_hash, assigned_role, now),
         )
-    return {"username": normalized_username}
+    return {"username": normalized_username, "role": assigned_role}
 
 
 def login_user(username: str, password: str) -> dict[str, Any]:
@@ -47,7 +50,7 @@ def login_user(username: str, password: str) -> dict[str, Any]:
 
     with get_connection() as connection:
         user = connection.execute(
-            "SELECT id, username, password_hash FROM users WHERE username = ?",
+            "SELECT id, username, role, password_hash FROM users WHERE username = ?",
             (normalized_username,),
         ).fetchone()
         if user is None or not _verify_password(normalized_password, user["password_hash"]):
@@ -66,7 +69,7 @@ def login_user(username: str, password: str) -> dict[str, Any]:
 
     return {
         "token": token,
-        "user": {"id": user["id"], "username": user["username"]},
+        "user": {"id": user["id"], "username": user["username"], "role": user["role"]},
         "expires_at": expires_at,
     }
 
@@ -81,7 +84,7 @@ def get_session_user(token: str) -> dict[str, Any] | None:
     with get_connection() as connection:
         row = connection.execute(
             """
-            SELECT u.id, u.username, s.expires_at
+            SELECT u.id, u.username, u.role, s.expires_at
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?
@@ -90,7 +93,51 @@ def get_session_user(token: str) -> dict[str, Any] | None:
         ).fetchone()
     if row is None:
         return None
-    return {"id": row["id"], "username": row["username"], "expires_at": row["expires_at"]}
+    return {"id": row["id"], "username": row["username"], "role": row["role"], "expires_at": row["expires_at"]}
+
+
+def list_users() -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, username, role, created_at
+            FROM users
+            ORDER BY id ASC
+            """
+        ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "username": row["username"],
+            "role": row["role"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def set_user_role(user_id: int, role: str) -> dict[str, Any]:
+    normalized_role = _normalize_role(role)
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, username
+            FROM users
+            WHERE id = ?
+            """,
+            (int(user_id),),
+        ).fetchone()
+        if row is None:
+            raise AppError(2001, "user not found")
+        connection.execute(
+            """
+            UPDATE users
+            SET role = ?
+            WHERE id = ?
+            """,
+            (normalized_role, int(user_id)),
+        )
+    return {"id": row["id"], "username": row["username"], "role": normalized_role}
 
 
 def logout_session(token: str) -> None:
@@ -120,6 +167,14 @@ def _normalize_password(password: str) -> str:
     normalized = password or ""
     if len(normalized) < 8 or len(normalized) > 128:
         raise AppError(1001, "password length must be between 8 and 128")
+    return normalized
+
+
+def _normalize_role(role: str) -> str:
+    normalized = (role or "").strip().lower()
+    if normalized not in ROLE_CHOICES:
+        allowed = ", ".join(sorted(ROLE_CHOICES))
+        raise AppError(1001, f"role must be one of {allowed}")
     return normalized
 
 

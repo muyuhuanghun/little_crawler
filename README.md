@@ -345,9 +345,12 @@ Day 12-13：
 - 已支持 `PYMS_QUEUE_BACKEND=inprocess|external|celery`
 - 已新增 `worker_main.py` 用于独立队列 worker 进程启动
 - 已新增 Celery 调度链路：`app/celery_app.py`、`app/celery_tasks.py`、`celery worker`、`celery beat`
+- 已补充 Celery 细粒度调度策略：`批调度 + 单项任务`，支持可配置限流
+- 已补充队列失败退避重试与死信落表：`dead_letters`
 - 已新增运行环境探测与监控接口：`/v1/runtime/probe`、`/v1/metrics`
 - 已补充 Prometheus + Alertmanager + Docker Compose 生产部署模板
 - 已接入用户注册 / 登录 / 会话体系：`/v1/auth/register`、`/v1/auth/login`、`/v1/auth/logout`、`/v1/auth/me`
+- 已接入 RBAC 与审计能力：`viewer/operator/admin`、`/v1/auth/users`、`/v1/auth/users/{id}/role`、`/v1/audit/logs`
 
 ### 4.4 当前结论
 
@@ -357,6 +360,12 @@ Day 12-13：
 1. Nginx / HTTPS / 域名与公网发布。
 2. Celery 任务策略深化（细粒度任务、死信、限流、退避）。
 3. 鉴权权限分层（RBAC）与生产审计闭环。
+
+### 4.5 本次推进结果（2026-04-13）
+
+- 已完成第 2 项：Celery 批调度 + 单项任务、失败退避重试、`dead_letters` 死信落表、可配置限流。
+- 已完成第 3 项（告警渠道）：Alertmanager 模板支持邮件 / 企业微信 / Slack，并通过环境变量注入。
+- 已完成第 4 项（权限与审计）：`viewer/operator/admin` RBAC、用户角色管理接口、`/v1/audit/logs` 审计查询。
 
 ---
 
@@ -377,10 +386,16 @@ Day 12-13：
 - `PYMS_QUEUE_BACKEND`：队列运行模式，`inprocess`（默认）/`external`（手工 worker）/`celery`（生产建议）
 - `PYMS_QUEUE_BATCH_SIZE`：Celery 单次处理的最大队列项数量，默认 `20`
 - `PYMS_QUEUE_POLL_INTERVAL_SECONDS`：Celery beat 调度间隔秒数，默认 `2`
+- `PYMS_QUEUE_RETRY_MAX_ATTEMPTS`：单队列项最大重试次数（不含首次），默认 `2`
+- `PYMS_QUEUE_RETRY_BACKOFF_BASE_SECONDS`：重试基础退避秒数，默认 `0.5`
+- `PYMS_QUEUE_RETRY_BACKOFF_MAX_SECONDS`：重试最大退避秒数，默认 `8`
+- `PYMS_CELERY_QUEUE_DRAIN_RATE_LIMIT`：批调度任务限流（如 `5/s`），默认不限制
+- `PYMS_CELERY_ITEM_RATE_LIMIT`：单项消费任务限流（如 `20/s`），默认不限制
 - `PYMS_QUEUE_PAGE_SIZE`：队列接口默认分页大小
 - `PYMS_QUEUE_PAGE_SIZE_MAX`：队列接口最大分页大小
 - `PYMS_RESULT_PAGE_SIZE`：结果接口默认分页大小
 - `PYMS_RESULT_PAGE_SIZE_MAX`：结果接口最大分页大小
+- `PYMS_AUDIT_LOG_ENABLED`：是否启用审计日志，默认 `true`
 
 PowerShell 示例：
 

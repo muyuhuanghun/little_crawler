@@ -1,11 +1,65 @@
 global:
   resolve_timeout: 5m
+  smtp_smarthost: '${SMTP_HOST:localhost:25}'
+  smtp_from: '${SMTP_FROM:pyms-alert@localhost}'
+  smtp_auth_username: '${SMTP_USERNAME:}'
+  smtp_auth_password: '${SMTP_PASSWORD:}'
+  smtp_require_tls: false
 
 route:
-  receiver: "default"
-  group_wait: 30s
-  group_interval: 5m
+  receiver: "null"
+  group_wait: 15s
+  group_interval: 2m
   repeat_interval: 1h
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: "critical-multi"
+    - matchers:
+        - severity="warning"
+      receiver: "warning-slack"
 
 receivers:
-  - name: "default"
+  - name: "null"
+
+  - name: "warning-slack"
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL:}'
+        channel: '${SLACK_CHANNEL:#pyms-alerts}'
+        send_resolved: true
+        title: '[PyMS][{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+        text: >-
+          {{ range .Alerts }}
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Instance:* {{ .Labels.instance }}
+          {{ end }}
+
+  - name: "critical-mail"
+    email_configs:
+      - to: '${ALERT_EMAIL_TO:ops@example.com}'
+        send_resolved: true
+
+  - name: "critical-wecom"
+    webhook_configs:
+      - url: '${WECOM_BOT_WEBHOOK:}'
+        send_resolved: true
+
+  - name: "critical-multi"
+    webhook_configs:
+      - url: '${WECOM_BOT_WEBHOOK:}'
+        send_resolved: true
+    email_configs:
+      - to: '${ALERT_EMAIL_TO:ops@example.com}'
+        send_resolved: true
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL:}'
+        channel: '${SLACK_CHANNEL:#pyms-alerts}'
+        send_resolved: true
+        title: '[PyMS][{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+        text: >-
+          {{ range .Alerts }}
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Instance:* {{ .Labels.instance }}
+          {{ end }}

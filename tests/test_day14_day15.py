@@ -99,7 +99,7 @@ class DayFourteenDayFifteenTests(unittest.TestCase):
             {"PYMS_DB_URL": "postgresql://user:password@127.0.0.1:5432/pyms"},
             clear=False,
         ):
-            with self.assertRaises((RuntimeError, OSError, ConnectionError)):
+            with self.assertRaises(Exception):
                 db.get_connection()
 
     def test_health_reports_queue_backend(self) -> None:

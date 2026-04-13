@@ -1,6 +1,7 @@
 const STORAGE_KEY = "pyms.apiKey";
 const REALTIME_REFRESH_MIN_INTERVAL_MS = 700;
 const MAX_EVENT_LOG_LINES = 120;
+const MAX_LOG_LINES_PER_FRAME = 8;
 const state = {
   selectedTaskId: null,
   eventSource: null,
@@ -19,6 +20,8 @@ const state = {
   pendingRealtimeRefresh: false,
   refreshInFlight: false,
   lastRealtimeRefreshAt: 0,
+  pendingLogFrame: null,
+  logQueue: [],
 };
 
 const elements = {
@@ -435,6 +438,11 @@ function startEventStream(taskId) {
     state.eventSource.close();
     state.eventSource = null;
   }
+  if (state.pendingLogFrame) {
+    window.cancelAnimationFrame(state.pendingLogFrame);
+    state.pendingLogFrame = null;
+  }
+  state.logQueue = [];
   elements.eventsLog.innerHTML = "";
   if (!taskId) {
     elements.streamStatus.textContent = "未连接";
@@ -446,19 +454,43 @@ function startEventStream(taskId) {
   state.eventSource.onopen = () => { elements.streamStatus.textContent = "已连接"; };
   state.eventSource.onerror = () => { elements.streamStatus.textContent = "连接结束"; };
   state.eventSource.onmessage = (event) => {
-    appendLogLine(JSON.parse(event.data));
+    enqueueLogLine(JSON.parse(event.data));
     scheduleRealtimeRefresh();
   };
 }
 
-function appendLogLine(payload) {
-  const line = document.createElement("div");
-  line.className = "log-line";
-  line.textContent = `[${payload.timestamp}] ${payload.event_type} ${JSON.stringify(payload.payload)}`;
-  elements.eventsLog.prepend(line);
+function enqueueLogLine(payload) {
+  state.logQueue.unshift(payload);
+  if (state.pendingLogFrame) {
+    return;
+  }
+  state.pendingLogFrame = window.requestAnimationFrame(flushLogQueue);
+}
+
+function flushLogQueue() {
+  state.pendingLogFrame = null;
+  if (!state.logQueue.length) {
+    return;
+  }
+  const batch = state.logQueue.splice(0, MAX_LOG_LINES_PER_FRAME);
+  const fragment = document.createDocumentFragment();
+  batch.forEach((payload) => {
+    fragment.appendChild(buildLogLine(payload));
+  });
+  elements.eventsLog.prepend(fragment);
   while (elements.eventsLog.children.length > MAX_EVENT_LOG_LINES) {
     elements.eventsLog.removeChild(elements.eventsLog.lastElementChild);
   }
+  if (state.logQueue.length) {
+    state.pendingLogFrame = window.requestAnimationFrame(flushLogQueue);
+  }
+}
+
+function buildLogLine(payload) {
+  const line = document.createElement("div");
+  line.className = "log-line";
+  line.textContent = `[${payload.timestamp}] ${payload.event_type} ${JSON.stringify(payload.payload)}`;
+  return line;
 }
 
 function scheduleRealtimeRefresh() {
