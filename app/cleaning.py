@@ -1,3 +1,4 @@
+"""数据清洗：规范化、去重、导出。"""
 from __future__ import annotations
 
 import csv
@@ -16,15 +17,9 @@ from app.db import get_connection
 from app.errors import AppError
 
 
-DEFAULT_PAGE = 1
-DEFAULT_PAGE_SIZE = 20
-MAX_PAGE_SIZE = 100
-RESULT_VIEWS = {"raw", "clean"}
-EXPORT_FORMATS = {"json", "csv"}
-
-
-@dataclass(slots=True)
+@dataclass
 class RawItem:
+    """一条原始抓取数据。"""
     news_id: str | None
     news_date: str | None
     news_title: str | None
@@ -33,319 +28,169 @@ class RawItem:
     raw_payload: dict[str, Any]
 
 
-def save_raw_items(
-    task_id: str,
-    items: list[RawItem],
-    fetched_at: str,
-    connection: Any | None = None,
-) -> int:
+def save_raw_items(task_id: str, items: list[RawItem], fetched_at: str, connection: Any = None) -> int:
+    """保存原始抓取数据到数据库。"""
     if not items:
         return 0
-
     if connection is None:
-        with get_connection() as managed_connection:
-            return save_raw_items(task_id, items, fetched_at, connection=managed_connection)
+        conn = get_connection()
+        try:
+            return save_raw_items(task_id, items, fetched_at, connection=conn)
+        finally:
+            conn.close()
 
     for item in items:
         connection.execute(
-            """
-            INSERT INTO raw_items (
-                task_id, news_id, news_date, news_title, news_content,
-                source_url, fetched_at, raw_payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                task_id,
-                item.news_id,
-                item.news_date,
-                item.news_title,
-                item.news_content,
-                item.source_url,
-                fetched_at,
-                json.dumps(item.raw_payload, ensure_ascii=True),
-            ),
+            "INSERT INTO raw_items (task_id, news_id, news_date, news_title, news_content, source_url, fetched_at, raw_payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, item.news_id, item.news_date, item.news_title, item.news_content, item.source_url, fetched_at, json.dumps(item.raw_payload, ensure_ascii=True)),
         )
     return len(items)
 
 
 def run_cleaning(task_id: str) -> dict[str, Any]:
+    """对任务的原始数据执行清洗和去重。"""
     _ensure_task_exists(task_id)
     cleaned_at = _now()
 
-    with get_connection() as connection:
-        rows = connection.execute(
-            """
-            SELECT id, news_id, news_date, news_title, news_content, source_url
-            FROM raw_items
-            WHERE task_id = ?
-            ORDER BY id ASC
-            """,
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, news_id, news_date, news_title, news_content, source_url FROM raw_items WHERE task_id = ? ORDER BY id ASC",
             (task_id,),
         ).fetchall()
+        conn.execute("DELETE FROM clean_items WHERE task_id = ?", (task_id,))
 
-        connection.execute("DELETE FROM clean_items WHERE task_id = ?", (task_id,))
-
-        clean_done_count = 0
-        clean_failed_count = 0
-
+        done_count = 0
+        fail_count = 0
         for row in rows:
             try:
-                clean_news_date = _normalize_date(row["news_date"])
-                clean_news_title = _normalize_text(row["news_title"])
-                clean_news_content = _normalize_text(row["news_content"])
-                dedup_key = _build_dedup_key(row["news_id"], clean_news_title, clean_news_date)
-
-                inserted = connection.execute(
-                    """
-                    INSERT OR IGNORE INTO clean_items (
-                        raw_id, task_id, clean_news_date, clean_news_title,
-                        clean_news_content, dedup_key, clean_status, cleaned_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'clean_done', ?)
-                    """,
-                    (
-                        row["id"],
-                        task_id,
-                        clean_news_date,
-                        clean_news_title,
-                        clean_news_content,
-                        dedup_key,
-                        cleaned_at,
-                    ),
+                date = _normalize_date(row["news_date"])
+                title = _normalize_text(row["news_title"])
+                content = _normalize_text(row["news_content"])
+                dedup_key = _build_dedup_key(row["news_id"], title, date)
+                inserted = conn.execute(
+                    "INSERT OR IGNORE INTO clean_items (raw_id, task_id, clean_news_date, clean_news_title, clean_news_content, dedup_key, clean_status, cleaned_at) VALUES (?, ?, ?, ?, ?, ?, 'clean_done', ?)",
+                    (row["id"], task_id, date, title, content, dedup_key, cleaned_at),
                 )
                 if inserted.rowcount == 1:
-                    clean_done_count += 1
+                    done_count += 1
             except Exception:
-                clean_failed_count += 1
-                failed_key = f"failed:{row['id']}"
-                connection.execute(
-                    """
-                    INSERT INTO clean_items (
-                        raw_id, task_id, clean_news_date, clean_news_title,
-                        clean_news_content, dedup_key, clean_status, cleaned_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'clean_failed', ?)
-                    """,
-                    (
-                        row["id"],
-                        task_id,
-                        None,
-                        None,
-                        None,
-                        failed_key,
-                        cleaned_at,
-                    ),
+                fail_count += 1
+                conn.execute(
+                    "INSERT INTO clean_items (raw_id, task_id, clean_news_date, clean_news_title, clean_news_content, dedup_key, clean_status, cleaned_at) VALUES (?, ?, ?, ?, ?, ?, 'clean_failed', ?)",
+                    (row["id"], task_id, None, None, None, f"failed:{row['id']}", cleaned_at),
                 )
 
-        connection.execute(
-            """
-            UPDATE tasks
-            SET clean_done_count = ?
-            WHERE task_id = ?
-            """,
-            (clean_done_count, task_id),
-        )
-        _insert_event_log(
-            connection,
-            task_id,
-            "clean_item_success",
-            {
-                "clean_done_count": clean_done_count,
-                "clean_failed_count": clean_failed_count,
-                "raw_total": len(rows),
-            },
-            cleaned_at,
-        )
+        conn.execute("UPDATE tasks SET clean_done_count = ? WHERE task_id = ?", (done_count, task_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
-    return {
-        "task_id": task_id,
-        "raw_total": len(rows),
-        "clean_done_count": clean_done_count,
-        "clean_failed_count": clean_failed_count,
-    }
+    return {"task_id": task_id, "raw_total": len(rows), "clean_done_count": done_count, "clean_failed_count": fail_count}
 
 
-def list_results(
-    task_id: str,
-    view: str = "clean",
-    page: int = DEFAULT_PAGE,
-    page_size: int = DEFAULT_PAGE_SIZE,
-    query: str | None = None,
-) -> dict[str, Any]:
+def list_results(task_id: str, view: str = "clean", page: int = 1, page_size: int = 20, query: str | None = None) -> dict[str, Any]:
+    """查询任务的结果数据（分页）。"""
     _ensure_task_exists(task_id)
-    normalized_view = view.strip().lower()
-    if normalized_view not in RESULT_VIEWS:
-        raise AppError(1001, "view must be one of raw, clean")
-
-    normalized_page = _normalize_pagination(page, "page", minimum=1, maximum=1_000_000)
-    normalized_page_size = _normalize_pagination(page_size, "page_size", minimum=1, maximum=MAX_PAGE_SIZE)
+    if view not in ("raw", "clean"):
+        raise AppError(1001, "view must be raw or clean")
+    page = max(1, int(page))
+    page_size = max(1, min(100, int(page_size)))
+    offset = (page - 1) * page_size
     keyword = (query or "").strip()
-    offset = (normalized_page - 1) * normalized_page_size
 
-    with get_connection() as connection:
-        if normalized_view == "raw":
-            where_sql = "WHERE task_id = ?"
+    conn = get_connection()
+    try:
+        if view == "raw":
+            where = "WHERE task_id = ?"
             params: list[Any] = [task_id]
             if keyword:
-                where_sql += " AND (COALESCE(news_title, '') LIKE ? OR COALESCE(news_content, '') LIKE ?)"
+                where += " AND (COALESCE(news_title, '') LIKE ? OR COALESCE(news_content, '') LIKE ?)"
                 params.extend([f"%{keyword}%", f"%{keyword}%"])
-
-            total_row = connection.execute(
-                f"SELECT COUNT(*) AS total FROM raw_items {where_sql}",
-                params,
-            ).fetchone()
-            rows = connection.execute(
-                f"""
-                SELECT id, news_id, news_date, news_title, news_content, source_url, fetched_at
-                FROM raw_items
-                {where_sql}
-                ORDER BY id DESC
-                LIMIT ? OFFSET ?
-                """,
-                [*params, normalized_page_size, offset],
-            ).fetchall()
-            items = [dict(row) for row in rows]
+            total = conn.execute(f"SELECT COUNT(*) AS c FROM raw_items {where}", params).fetchone()["c"]
+            rows = conn.execute(f"SELECT id, news_id, news_date, news_title, news_content, source_url, fetched_at FROM raw_items {where} ORDER BY id DESC LIMIT ? OFFSET ?", [*params, page_size, offset]).fetchall()
+            items = [dict(r) for r in rows]
         else:
-            where_sql = "WHERE task_id = ?"
+            where = "WHERE task_id = ?"
             params = [task_id]
             if keyword:
-                where_sql += (
-                    " AND (COALESCE(clean_news_title, '') LIKE ? OR COALESCE(clean_news_content, '') LIKE ?)"
-                )
+                where += " AND (COALESCE(clean_news_title, '') LIKE ? OR COALESCE(clean_news_content, '') LIKE ?)"
                 params.extend([f"%{keyword}%", f"%{keyword}%"])
+            total = conn.execute(f"SELECT COUNT(*) AS c FROM clean_items {where}", params).fetchone()["c"]
+            rows = conn.execute(f"SELECT id, raw_id, clean_news_date, clean_news_title, clean_news_content, dedup_key, clean_status, cleaned_at FROM clean_items {where} ORDER BY id DESC LIMIT ? OFFSET ?", [*params, page_size, offset]).fetchall()
+            items = [dict(r) for r in rows]
+    finally:
+        conn.close()
 
-            total_row = connection.execute(
-                f"SELECT COUNT(*) AS total FROM clean_items {where_sql}",
-                params,
-            ).fetchone()
-            rows = connection.execute(
-                f"""
-                SELECT
-                    id, raw_id, clean_news_date, clean_news_title,
-                    clean_news_content, dedup_key, clean_status, cleaned_at
-                FROM clean_items
-                {where_sql}
-                ORDER BY id DESC
-                LIMIT ? OFFSET ?
-                """,
-                [*params, normalized_page_size, offset],
-            ).fetchall()
-            items = [dict(row) for row in rows]
-
-    return {
-        "task_id": task_id,
-        "view": normalized_view,
-        "page": normalized_page,
-        "page_size": normalized_page_size,
-        "total": total_row["total"],
-        "items": items,
-    }
+    return {"task_id": task_id, "view": view, "page": page, "page_size": page_size, "total": total, "items": items}
 
 
 def export_results(task_id: str, export_format: str) -> dict[str, Any]:
+    """导出清洗结果为 JSON 或 CSV。"""
     _ensure_task_exists(task_id)
-    normalized_format = export_format.strip().lower()
-    if normalized_format not in EXPORT_FORMATS:
-        raise AppError(1001, "format must be one of json, csv")
+    if export_format not in ("json", "csv"):
+        raise AppError(1001, "format must be json or csv")
 
-    with get_connection() as connection:
-        rows = connection.execute(
-            """
-            SELECT
-                id, raw_id, clean_news_date, clean_news_title,
-                clean_news_content, dedup_key, clean_status, cleaned_at
-            FROM clean_items
-            WHERE task_id = ?
-            ORDER BY id ASC
-            """,
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, raw_id, clean_news_date, clean_news_title, clean_news_content, dedup_key, clean_status, cleaned_at FROM clean_items WHERE task_id = ? ORDER BY id ASC",
             (task_id,),
         ).fetchall()
+    finally:
+        conn.close()
 
-    items = [dict(row) for row in rows]
-    filename = f"{task_id}_clean_results.{normalized_format}"
+    items = [dict(r) for r in rows]
+    filename = f"{task_id}_results.{export_format}"
 
-    if normalized_format == "json":
-        content = json.dumps(items, ensure_ascii=False, indent=2)
-        return {
-            "filename": filename,
-            "media_type": "application/json; charset=utf-8",
-            "content": content.encode("utf-8"),
-        }
+    if export_format == "json":
+        return {"filename": filename, "media_type": "application/json; charset=utf-8", "content": json.dumps(items, ensure_ascii=False, indent=2).encode("utf-8")}
 
-    buffer = io.StringIO()
-    fieldnames = [
-        "id",
-        "raw_id",
-        "clean_news_date",
-        "clean_news_title",
-        "clean_news_content",
-        "dedup_key",
-        "clean_status",
-        "cleaned_at",
-    ]
-    writer = csv.DictWriter(buffer, fieldnames=fieldnames, lineterminator="\n")
+    buf = io.StringIO()
+    fields = ["id", "raw_id", "clean_news_date", "clean_news_title", "clean_news_content", "dedup_key", "clean_status", "cleaned_at"]
+    writer = csv.DictWriter(buf, fieldnames=fields, lineterminator="\n")
     writer.writeheader()
     writer.writerows(items)
-    return {
-        "filename": filename,
-        "media_type": "text/csv; charset=utf-8",
-        "content": buffer.getvalue().encode("utf-8"),
-    }
+    return {"filename": filename, "media_type": "text/csv; charset=utf-8", "content": buf.getvalue().encode("utf-8")}
 
 
 def _normalize_date(value: str | None) -> str | None:
-    normalized = _normalize_text(value)
-    if not normalized:
+    text = _normalize_text(value)
+    if not text:
         return None
-
     for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y年%m月%d日"):
         try:
-            return datetime.strptime(normalized, fmt).strftime("%Y-%m-%d")
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
-    return normalized
+    return text
 
 
 def _normalize_text(value: str | None) -> str | None:
     if value is None:
         return None
     stripped = BeautifulSoup(html.unescape(value), "html.parser").get_text(" ", strip=True)
-    collapsed = re.sub(r"\s+", " ", stripped).strip()
-    return collapsed or None
+    return re.sub(r"\s+", " ", stripped).strip() or None
 
 
-def _build_dedup_key(news_id: str | None, clean_news_title: str | None, clean_news_date: str | None) -> str:
+def _build_dedup_key(news_id: str | None, title: str | None, date: str | None) -> str:
     if news_id:
         return f"news_id:{news_id.strip()}"
-    source = f"{clean_news_title or ''}|{clean_news_date or ''}"
+    source = f"{title or ''}|{date or ''}"
     return "title_date:" + hashlib.sha1(source.encode("utf-8")).hexdigest()
 
 
-def _normalize_pagination(value: Any, field: str, minimum: int, maximum: int) -> int:
-    if isinstance(value, bool):
-        raise AppError(1001, f"{field} must be an integer")
-    try:
-        normalized = int(value)
-    except (TypeError, ValueError) as exc:
-        raise AppError(1001, f"{field} must be an integer") from exc
-    if normalized < minimum or normalized > maximum:
-        raise AppError(1001, f"{field} must be between {minimum} and {maximum}")
-    return normalized
-
-
 def _ensure_task_exists(task_id: str) -> None:
-    with get_connection() as connection:
-        row = connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+    finally:
+        conn.close()
     if row is None:
         raise AppError(2001)
-
-
-def _insert_event_log(connection: Any, task_id: str, event_type: str, payload: dict[str, Any], created_at: str) -> None:
-    connection.execute(
-        """
-        INSERT INTO event_logs (task_id, event_type, payload_json, created_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        (task_id, event_type, json.dumps(payload, ensure_ascii=True), created_at),
-    )
 
 
 def _now() -> str:

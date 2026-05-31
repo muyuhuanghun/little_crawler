@@ -1,194 +1,107 @@
-
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PyMS Control Console</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=Noto+Sans+SC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <title>PyMS 爬虫控制台</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-  <main class="app-shell">
-    <section class="topbar glass">
-      <div class="brand-block">
-        <p class="eyebrow">PyMS Control Plane</p>
-        <h1>网页爬虫控制台</h1>
+  <header class="nav">
+    <span class="logo">PyMS</span>
+    <span class="subtitle">网页爬虫控制台</span>
+  </header>
+
+  <main>
+    <!-- 提交任务 -->
+    <section class="card">
+      <h2>创建任务</h2>
+      <form id="submit-form" class="form-row">
+        <input id="submit-url" type="url" placeholder="输入目标 URL" required>
+        <input id="submit-limit" type="number" min="1" max="1000" value="50" title="最大页面数">
+        <input id="submit-depth" type="number" min="1" max="5" value="1" title="爬取深度">
+        <input id="submit-task-name" type="text" placeholder="任务名称（可选）">
+        <button type="submit">开始爬取</button>
+      </form>
+      <pre id="submit-output" class="output-box"></pre>
+    </section>
+
+    <!-- 命令控制台 -->
+    <section class="card">
+      <h2>命令控制台</h2>
+      <form id="command-form" class="form-row">
+        <input id="command-input" type="text" placeholder="输入命令，例如：task status task_id=task_xxx" required>
+        <button type="submit">执行</button>
+      </form>
+      <div class="quick-btns">
+        <button data-cmd="task status" type="button">状态</button>
+        <button data-cmd="crawl pause" type="button">暂停</button>
+        <button data-cmd="crawl resume" type="button">继续</button>
+        <button data-cmd="crawl stop" type="button">停止</button>
+        <button data-cmd="clean run" type="button">清洗</button>
       </div>
-      <div class="auth-card">
-        <div>
-          <p class="micro-label">API Key</p>
-          <strong id="auth-status">未设置</strong>
+      <pre id="command-output" class="output-box"></pre>
+    </section>
+
+    <!-- 任务列表 + 详情 -->
+    <section class="two-col">
+      <div class="card">
+        <div class="card-header">
+          <h2>任务列表</h2>
+          <button id="refresh-tasks" type="button">刷新</button>
         </div>
-        <form id="auth-form" class="auth-form">
-          <input id="api-key-input" type="password" placeholder="输入部署环境 API Key">
-          <button class="secondary" type="submit">保存</button>
-          <button id="clear-api-key" class="ghost" type="button">清除</button>
-        </form>
+        <div id="task-list"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>任务详情</h2>
+          <div>
+            <button id="delete-task" type="button" class="btn-danger">删除</button>
+            <button data-format="json" id="export-json" type="button">导出JSON</button>
+            <button data-format="csv" id="export-csv" type="button">导出CSV</button>
+          </div>
+        </div>
+        <div id="task-detail"></div>
       </div>
     </section>
 
-    <section class="hero-strip glass">
-      <article class="hero-panel">
-        <p class="micro-label">Workspace</p>
-        <div class="metric-row">
-          <div class="metric-card"><span>任务总数</span><strong id="stat-total">0</strong></div>
-          <div class="metric-card"><span>运行中</span><strong id="stat-running">0</strong></div>
-          <div class="metric-card"><span>已完成</span><strong id="stat-success">0</strong></div>
-          <div class="metric-card"><span>鉴权状态</span><strong id="stat-auth">Open</strong></div>
-        </div>
-      </article>
-      <article class="hero-panel hero-panel-muted">
-        <p class="micro-label">Roadmap</p>
-        <ul class="plain-list">
-          <li>当前轮次先完成 API Key、分页看板与界面重构。</li>
-          <li>注册、登录与多用户体系保留到下一阶段。</li>
-          <li>PostgreSQL / Redis 生产切换在这一轮先做好配置位和前端鉴权态。</li>
-        </ul>
-      </article>
+    <!-- 事件流 + 队列 -->
+    <section class="two-col">
+      <div class="card">
+        <h2>实时事件流 <span id="stream-status" class="tag">未连接</span></h2>
+        <div id="events-log" class="event-log"></div>
+      </div>
+
+      <div class="card">
+        <h2>队列面板</h2>
+        <div id="queue-summary" class="summary-row"></div>
+        <div id="queue-table-wrap"></div>
+      </div>
     </section>
 
-    <section class="workspace-grid">
-      <aside class="column left-rail">
-        <article class="glass panel">
-          <div class="section-head">
-            <div><p class="micro-label">Launch</p><h2>创建任务</h2></div>
-            <button id="refresh-tasks" class="ghost" type="button">刷新</button>
-          </div>
-          <form id="submit-form" class="stack-form">
-            <label>
-              <span>目标 URL</span>
-              <input id="submit-url" name="url" type="url" placeholder="https://example.com/news" required>
-            </label>
-            <div class="split-row">
-              <label>
-                <span>Limit</span>
-                <input id="submit-limit" name="limit" type="number" min="1" max="1000" value="50" required>
-              </label>
-              <label>
-                <span>Depth</span>
-                <input id="submit-depth" name="depth" type="number" min="1" max="5" value="1" required>
-              </label>
-            </div>
-            <div class="split-row">
-              <label>
-                <span>Task Name</span>
-                <input id="submit-task-name" name="task_name" type="text" placeholder="optional">
-              </label>
-              <label>
-                <span>Renderer</span>
-                <select id="submit-renderer" name="renderer">
-                  <option value="http" selected>HTTP</option>
-                  <option value="browser">Browser / Playwright</option>
-                </select>
-              </label>
-            </div>
-            <button class="primary" type="submit">开始爬取</button>
-          </form>
-          <pre id="submit-output" class="terminal-box"></pre>
-        </article>
-
-        <article class="glass panel stretch">
-          <div class="section-head">
-            <div><p class="micro-label">Tasks</p><h2>任务列表</h2></div>
-            <span id="selected-task-label" class="hint">未选择任务</span>
-          </div>
-          <div id="task-list" class="task-list"></div>
-        </article>
-      </aside>
-
-      <section class="column main-stage">
-        <article class="glass panel">
-          <div class="section-head">
-            <div><p class="micro-label">Overview</p><h2>任务详情</h2></div>
-            <div class="action-row">
-              <button id="generate-wordcloud" class="ghost" type="button">词云</button>
-              <button data-format="json" id="export-json" class="ghost" type="button">JSON</button>
-              <button data-format="csv" id="export-csv" class="ghost" type="button">CSV</button>
-            </div>
-          </div>
-          <div id="task-detail" class="detail-grid"></div>
-          <div id="wordcloud-panel" class="wordcloud-panel hidden">
-            <div class="section-head compact">
-              <h3>词云预览</h3>
-              <span id="wordcloud-meta" class="hint">尚未生成</span>
-            </div>
-            <img id="wordcloud-image" alt="任务词云图预览">
-          </div>
-        </article>
-
-        <article class="glass panel">
-          <div class="section-head">
-            <div><p class="micro-label">Queue</p><h2>队列面板</h2></div>
-            <div class="toolbar-row">
-              <select id="queue-state">
-                <option value="all">全部状态</option>
-                <option value="pending">Pending</option>
-                <option value="running">Running</option>
-                <option value="done">Done</option>
-                <option value="failed">Failed</option>
-                <option value="canceled">Canceled</option>
-              </select>
-              <button id="queue-prev" class="ghost" type="button">上一页</button>
-              <span id="queue-page-label" class="hint">1 / 1</span>
-              <button id="queue-next" class="ghost" type="button">下一页</button>
-            </div>
-          </div>
-          <div id="queue-summary" class="summary-row"></div>
-          <div id="queue-table-wrap" class="table-wrap"></div>
-        </article>
-
-        <article class="glass panel">
-          <div class="section-head">
-            <div><p class="micro-label">Results</p><h2>结果表</h2></div>
-            <div class="toolbar-row">
-              <select id="results-view">
-                <option value="clean" selected>Clean</option>
-                <option value="raw">Raw</option>
-              </select>
-              <input id="results-query" type="search" placeholder="搜索标题或正文">
-              <button id="results-search" class="secondary" type="button">搜索</button>
-              <button id="results-prev" class="ghost" type="button">上一页</button>
-              <span id="results-page-label" class="hint">1 / 1</span>
-              <button id="results-next" class="ghost" type="button">下一页</button>
-            </div>
-          </div>
-          <div id="results-table-wrap" class="table-wrap"></div>
-        </article>
-      </section>
-
-      <aside class="column right-rail">
-        <article class="glass panel">
-          <div class="section-head">
-            <div><p class="micro-label">Console</p><h2>命令控制</h2></div>
-            <span class="hint">start / pause / resume / stop / clean</span>
-          </div>
-          <form id="command-form" class="command-form">
-            <input id="command-input" type="text" placeholder="例如：task status task_id=task_xxx" required>
-            <button class="primary" type="submit">执行</button>
-          </form>
-          <div class="quick-actions">
-            <button data-command="task status" class="ghost quick" type="button">状态</button>
-            <button data-command="crawl pause" class="ghost quick" type="button">暂停</button>
-            <button data-command="crawl resume" class="ghost quick" type="button">继续</button>
-            <button data-command="crawl stop" class="ghost quick" type="button">停止</button>
-            <button data-command="clean run" class="ghost quick" type="button">清洗</button>
-          </div>
-          <pre id="command-output" class="terminal-box"></pre>
-        </article>
-
-        <article class="glass panel stretch">
-          <div class="section-head">
-            <div><p class="micro-label">Realtime</p><h2>事件流</h2></div>
-            <span id="stream-status" class="hint">未连接</span>
-          </div>
-          <div id="events-log" class="event-log"></div>
-        </article>
-      </aside>
+    <!-- 结果 -->
+    <section class="card">
+      <div class="card-header">
+        <h2>结果数据</h2>
+        <div class="form-row">
+          <select id="results-view">
+            <option value="clean">Clean</option>
+            <option value="raw">Raw</option>
+          </select>
+          <input id="results-query" type="search" placeholder="搜索标题或正文">
+          <button id="results-search" type="button">搜索</button>
+        </div>
+      </div>
+      <div id="results-table-wrap"></div>
+      <div class="pager">
+        <button id="results-prev" type="button">上一页</button>
+        <span id="results-page-label">1 / 1</span>
+        <button id="results-next" type="button">下一页</button>
+      </div>
     </section>
   </main>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

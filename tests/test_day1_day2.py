@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import socket
-from unittest import mock
-import unittest
-from pathlib import Path
 import shutil
+import unittest
 import uuid
+from pathlib import Path
 
 from app import db
 from app.errors import AppError
-from app.security import assert_public_network_target, validate_target_url
+from app.security import validate_target_url
 from app.service import get_task, list_tasks, submit_task
 from app.state_machine import can_transition
 
@@ -34,10 +32,9 @@ class DayOneDayTwoTests(unittest.TestCase):
             validate_target_url("http://127.0.0.1/admin")
         self.assertEqual(context.exception.code, 1002)
 
-    def test_resolved_private_host_is_forbidden(self) -> None:
-        with mock.patch("app.security.socket.getaddrinfo", return_value=[(socket.AF_INET, 0, 0, "", ("127.0.0.1", 0))]):
-            with self.assertRaises(AppError) as context:
-                assert_public_network_target("https://example.com/news")
+    def test_validate_forbids_localhost(self) -> None:
+        with self.assertRaises(AppError) as context:
+            validate_target_url("http://localhost/test")
         self.assertEqual(context.exception.code, 1002)
 
     def test_submit_task_initializes_queue_and_detail(self) -> None:

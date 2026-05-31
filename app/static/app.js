@@ -1,569 +1,228 @@
-const STORAGE_KEY = "pyms.apiKey";
-const REALTIME_REFRESH_MIN_INTERVAL_MS = 700;
-const MAX_EVENT_LOG_LINES = 120;
-const MAX_LOG_LINES_PER_FRAME = 8;
+/* 前端控制台逻辑 */
 const state = {
   selectedTaskId: null,
   eventSource: null,
-  wordcloudUrl: null,
-  apiKey: localStorage.getItem(STORAGE_KEY) || "",
-  queuePage: 1,
-  queuePageSize: 8,
-  queueState: "all",
-  queueTotal: 0,
   resultsPage: 1,
-  resultsPageSize: 6,
   resultsView: "clean",
   resultsQuery: "",
   resultsTotal: 0,
-  realtimeRefreshTimer: null,
-  pendingRealtimeRefresh: false,
-  refreshInFlight: false,
-  lastRealtimeRefreshAt: 0,
-  pendingLogFrame: null,
-  logQueue: [],
 };
 
-const elements = {
-  authForm: document.getElementById("auth-form"),
-  apiKeyInput: document.getElementById("api-key-input"),
-  clearApiKey: document.getElementById("clear-api-key"),
-  authStatus: document.getElementById("auth-status"),
-  submitForm: document.getElementById("submit-form"),
-  submitOutput: document.getElementById("submit-output"),
-  refreshTasks: document.getElementById("refresh-tasks"),
-  taskList: document.getElementById("task-list"),
-  selectedTaskLabel: document.getElementById("selected-task-label"),
-  commandForm: document.getElementById("command-form"),
-  commandInput: document.getElementById("command-input"),
-  commandOutput: document.getElementById("command-output"),
-  quickButtons: Array.from(document.querySelectorAll(".quick")),
-  detail: document.getElementById("task-detail"),
-  streamStatus: document.getElementById("stream-status"),
-  eventsLog: document.getElementById("events-log"),
-  exportButtons: Array.from(document.querySelectorAll("[data-format]")),
-  generateWordcloud: document.getElementById("generate-wordcloud"),
-  wordcloudPanel: document.getElementById("wordcloud-panel"),
-  wordcloudImage: document.getElementById("wordcloud-image"),
-  wordcloudMeta: document.getElementById("wordcloud-meta"),
-  statTotal: document.getElementById("stat-total"),
-  statRunning: document.getElementById("stat-running"),
-  statSuccess: document.getElementById("stat-success"),
-  statAuth: document.getElementById("stat-auth"),
-  queueState: document.getElementById("queue-state"),
-  queuePrev: document.getElementById("queue-prev"),
-  queueNext: document.getElementById("queue-next"),
-  queuePageLabel: document.getElementById("queue-page-label"),
-  queueSummary: document.getElementById("queue-summary"),
-  queueTableWrap: document.getElementById("queue-table-wrap"),
-  resultsView: document.getElementById("results-view"),
-  resultsQuery: document.getElementById("results-query"),
-  resultsSearch: document.getElementById("results-search"),
-  resultsPrev: document.getElementById("results-prev"),
-  resultsNext: document.getElementById("results-next"),
-  resultsPageLabel: document.getElementById("results-page-label"),
-  resultsTableWrap: document.getElementById("results-table-wrap"),
-};
+// DOM 元素
+const $ = (id) => document.getElementById(id);
 
 function init() {
-  elements.apiKeyInput.value = state.apiKey;
-  updateAuthStatus();
-  elements.authForm.addEventListener("submit", onSaveApiKey);
-  elements.clearApiKey.addEventListener("click", onClearApiKey);
-  elements.submitForm.addEventListener("submit", onSubmitTask);
-  elements.refreshTasks.addEventListener("click", () => void loadTasks());
-  elements.commandForm.addEventListener("submit", onCommandRun);
-  elements.quickButtons.forEach((button) => button.addEventListener("click", onQuickCommand));
-  elements.exportButtons.forEach((button) => button.addEventListener("click", onExport));
-  elements.generateWordcloud.addEventListener("click", onGenerateWordcloud);
-  elements.queueState.addEventListener("change", async (event) => {
-    state.queueState = event.currentTarget.value;
-    state.queuePage = 1;
-    await refreshQueue();
+  $("submit-form").addEventListener("submit", onSubmitTask);
+  $("refresh-tasks").addEventListener("click", loadTasks);
+  $("command-form").addEventListener("submit", onCommand);
+  $("delete-task").addEventListener("click", onDeleteTask);
+  $("export-json").addEventListener("click", () => onExport("json"));
+  $("export-csv").addEventListener("click", () => onExport("csv"));
+  $("results-search").addEventListener("click", onResultsSearch);
+  $("results-query").addEventListener("keydown", (e) => { if (e.key === "Enter") onResultsSearch(); });
+  $("results-view").addEventListener("change", (e) => { state.resultsView = e.target.value; state.resultsPage = 1; refreshResults(); });
+  $("results-prev").addEventListener("click", () => { if (state.resultsPage > 1) { state.resultsPage--; refreshResults(); } });
+  $("results-next").addEventListener("click", () => { if (state.resultsPage < totalPages(state.resultsTotal)) { state.resultsPage++; refreshResults(); } });
+  document.querySelectorAll("[data-cmd]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!state.selectedTaskId) { showOutput("command-output", { message: "请先选择任务", code: 1001 }); return; }
+      $("command-input").value = `${btn.dataset.cmd} task_id=${state.selectedTaskId}`;
+    });
   });
-  elements.queuePrev.addEventListener("click", async () => {
-    if (state.queuePage > 1) {
-      state.queuePage -= 1;
-      await refreshQueue();
-    }
-  });
-  elements.queueNext.addEventListener("click", async () => {
-    if (state.queuePage < totalPages(state.queueTotal, state.queuePageSize)) {
-      state.queuePage += 1;
-      await refreshQueue();
-    }
-  });
-  elements.resultsView.addEventListener("change", async (event) => {
-    state.resultsView = event.currentTarget.value;
-    state.resultsPage = 1;
-    await refreshResults();
-  });
-  elements.resultsSearch.addEventListener("click", async () => {
-    state.resultsQuery = elements.resultsQuery.value.trim();
-    state.resultsPage = 1;
-    await refreshResults();
-  });
-  elements.resultsQuery.addEventListener("keydown", async (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      state.resultsQuery = elements.resultsQuery.value.trim();
-      state.resultsPage = 1;
-      await refreshResults();
-    }
-  });
-  elements.resultsPrev.addEventListener("click", async () => {
-    if (state.resultsPage > 1) {
-      state.resultsPage -= 1;
-      await refreshResults();
-    }
-  });
-  elements.resultsNext.addEventListener("click", async () => {
-    if (state.resultsPage < totalPages(state.resultsTotal, state.resultsPageSize)) {
-      state.resultsPage += 1;
-      await refreshResults();
-    }
-  });
-  void loadTasks();
+  loadTasks();
 }
 
-function onSaveApiKey(event) {
-  event.preventDefault();
-  state.apiKey = elements.apiKeyInput.value.trim();
-  localStorage.setItem(STORAGE_KEY, state.apiKey);
-  updateAuthStatus();
-  renderOutput(elements.commandOutput, { code: 0, message: "API Key 已保存到当前浏览器", data: null });
-}
-
-function onClearApiKey() {
-  state.apiKey = "";
-  elements.apiKeyInput.value = "";
-  localStorage.removeItem(STORAGE_KEY);
-  updateAuthStatus();
-  if (state.eventSource) {
-    state.eventSource.close();
-    state.eventSource = null;
-  }
-}
-
-async function onSubmitTask(event) {
-  event.preventDefault();
-  const formData = new FormData(elements.submitForm);
+// 提交任务
+async function onSubmitTask(e) {
+  e.preventDefault();
   const payload = {
-    url: String(formData.get("url") || "").trim(),
-    limit: Number(formData.get("limit") || 50),
-    depth: Number(formData.get("depth") || 1),
-    renderer: String(formData.get("renderer") || "http").trim(),
+    url: $("submit-url").value.trim(),
+    limit: Number($("submit-limit").value) || 50,
+    depth: Number($("submit-depth").value) || 1,
   };
-  const taskName = String(formData.get("task_name") || "").trim();
-  if (taskName) {
-    payload.task_name = taskName;
-  }
-  const response = await apiFetch("/v1/crawl/submit", { method: "POST", body: JSON.stringify(payload) });
-  renderOutput(elements.submitOutput, response);
-  if (response.code === 0 && response.data?.task_id) {
-    state.queuePage = 1;
-    state.resultsPage = 1;
-    selectTask(response.data.task_id);
+  const name = $("submit-task-name").value.trim();
+  if (name) payload.task_name = name;
+  const res = await api("/v1/crawl/submit", { method: "POST", body: JSON.stringify(payload) });
+  showOutput("submit-output", res);
+  if (res.code === 0 && res.data?.task_id) {
+    selectTask(res.data.task_id);
     await loadTasks();
-    await refreshSelectedTask();
   }
 }
 
-async function onCommandRun(event) {
-  event.preventDefault();
-  const command = elements.commandInput.value.trim();
-  if (!command) {
-    return;
-  }
-  const response = await apiFetch("/v1/command", { method: "POST", body: JSON.stringify({ command }) });
-  renderOutput(elements.commandOutput, response);
-  if (response.code === 0 && response.data?.task_id) {
-    selectTask(response.data.task_id);
+// 执行命令
+async function onCommand(e) {
+  e.preventDefault();
+  const cmd = $("command-input").value.trim();
+  if (!cmd) return;
+  const res = await api("/v1/command", { method: "POST", body: JSON.stringify({ command: cmd }) });
+  showOutput("command-output", res);
+  if (res.code === 0 && res.data?.task_id) {
+    selectTask(res.data.task_id);
     await loadTasks();
-    await refreshSelectedTask();
   }
 }
 
-function onQuickCommand(event) {
-  if (!state.selectedTaskId) {
-    renderOutput(elements.commandOutput, { message: "请先选择任务", code: 1001, data: null });
-    return;
+// 删除任务
+async function onDeleteTask() {
+  if (!state.selectedTaskId) return;
+  if (!confirm(`确认删除任务 ${state.selectedTaskId}？`)) return;
+  const res = await api(`/v1/tasks/${state.selectedTaskId}`, { method: "DELETE" });
+  showOutput("command-output", res);
+  if (res.code === 0) {
+    closeStream();
+    state.selectedTaskId = null;
+    $("task-detail").innerHTML = '<div class="empty">选择任务后显示详情</div>';
+    $("events-log").innerHTML = "";
+    $("stream-status").textContent = "未连接";
+    await loadTasks();
   }
-  elements.commandInput.value = `${event.currentTarget.dataset.command} task_id=${state.selectedTaskId}`;
 }
 
-async function onExport(event) {
-  if (!state.selectedTaskId) {
-    renderOutput(elements.commandOutput, { message: "请先选择任务再导出", code: 1001, data: null });
-    return;
-  }
-  const format = event.currentTarget.dataset.format;
-  const response = await fetch(`/v1/tasks/${encodeURIComponent(state.selectedTaskId)}/export`, {
+// 导出
+async function onExport(format) {
+  if (!state.selectedTaskId) return;
+  const resp = await fetch(`/v1/tasks/${state.selectedTaskId}/export`, {
     method: "POST",
-    headers: buildHeaders(),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ format }),
   });
-  if (!response.ok) {
-    renderOutput(elements.commandOutput, await response.json());
-    return;
-  }
-  const blob = await response.blob();
+  if (!resp.ok) { showOutput("command-output", await resp.json()); return; }
+  const blob = await resp.blob();
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  const disposition = response.headers.get("content-disposition") || "";
-  const filenameMatch = disposition.match(/filename="([^"]+)"/);
-  anchor.href = url;
-  anchor.download = filenameMatch ? filenameMatch[1] : `${state.selectedTaskId}.${format}`;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${state.selectedTaskId}.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
   URL.revokeObjectURL(url);
 }
 
-async function onGenerateWordcloud() {
-  if (!state.selectedTaskId) {
-    renderOutput(elements.commandOutput, { message: "请先选择任务再生成词云图", code: 1001, data: null });
-    return;
-  }
-  const response = await fetch(`/v1/tasks/${encodeURIComponent(state.selectedTaskId)}/wordcloud`, {
-    method: "POST",
-    headers: buildHeaders(),
-    body: JSON.stringify({ view: "auto", width: 1200, height: 720, top_n: 80 }),
-  });
-  if (!response.ok) {
-    renderOutput(elements.commandOutput, await response.json());
-    return;
-  }
-  const blob = await response.blob();
-  if (state.wordcloudUrl) {
-    URL.revokeObjectURL(state.wordcloudUrl);
-  }
-  state.wordcloudUrl = URL.createObjectURL(blob);
-  elements.wordcloudImage.src = state.wordcloudUrl;
-  elements.wordcloudPanel.classList.remove("hidden");
-
-  const view = response.headers.get("x-wordcloud-view") || "auto";
-  let topTermText = "";
-  try {
-    topTermText = JSON.parse(response.headers.get("x-wordcloud-top-terms") || "[]")
-      .slice(0, 5)
-      .map((item) => `${item.word}:${item.count}`)
-      .join(" | ");
-  } catch {
-    topTermText = "";
-  }
-  elements.wordcloudMeta.textContent = `来源=${view}${topTermText ? ` | 热词=${topTermText}` : ""}`;
+// 搜索结果
+function onResultsSearch() {
+  state.resultsQuery = $("results-query").value.trim();
+  state.resultsPage = 1;
+  refreshResults();
 }
 
+// 加载任务列表
 async function loadTasks() {
-  const response = await apiFetch("/v1/tasks");
-  if (response.code !== 0 || !Array.isArray(response.data)) {
-    renderTaskList([]);
-    return;
-  }
-  updateHeroStats(response.data);
-  renderTaskList(response.data);
-  if (!state.selectedTaskId && response.data.length > 0) {
-    selectTask(response.data[0].task_id);
+  const res = await api("/v1/tasks");
+  if (res.code !== 0 || !Array.isArray(res.data)) { renderTaskList([]); return; }
+  renderTaskList(res.data);
+  if (!state.selectedTaskId && res.data.length > 0) {
+    selectTask(res.data[0].task_id);
     await refreshSelectedTask();
   }
 }
 
-function updateHeroStats(tasks) {
-  elements.statTotal.textContent = String(tasks.length);
-  elements.statRunning.textContent = String(tasks.filter((task) => task.status === "running").length);
-  elements.statSuccess.textContent = String(tasks.filter((task) => task.status === "success").length);
-  updateAuthStatus();
-}
-
-function updateAuthStatus() {
-  const enabled = Boolean(state.apiKey);
-  elements.authStatus.textContent = enabled ? "已设置" : "未设置";
-  elements.statAuth.textContent = enabled ? "Secured" : "Open";
-}
-
+// 渲染任务列表
 function renderTaskList(tasks) {
   if (!tasks.length) {
-    elements.taskList.innerHTML = '<div class="empty-state">当前没有任务</div>';
+    $("task-list").innerHTML = '<div class="empty">当前没有任务</div>';
     return;
   }
-  elements.taskList.innerHTML = tasks.map((task) => `
-    <button class="task-chip ${task.task_id === state.selectedTaskId ? "active" : ""}" data-task-id="${task.task_id}">
-      <strong>${escapeHtml(task.task_name || task.task_id)}</strong>
-      <span>${escapeHtml(task.task_id)}</span>
-      <span class="status-pill status-${escapeHtml(task.status)}">${escapeHtml(task.status)}</span>
-      <span>progress=${escapeHtml(String(task.progress))}% done=${escapeHtml(String(task.done_count))}/${escapeHtml(String(task.total_count))}</span>
+  $("task-list").innerHTML = tasks.map((t) => `
+    <button class="task-item ${t.task_id === state.selectedTaskId ? "active" : ""}" data-id="${t.task_id}">
+      <div class="name">${esc(t.task_name || t.task_id)}</div>
+      <div class="meta">${esc(t.task_id)} · <span class="tag tag-${esc(t.status)}">${esc(t.status)}</span> · progress=${esc(String(t.progress))}%</div>
     </button>
   `).join("");
-
-  Array.from(elements.taskList.querySelectorAll("[data-task-id]")).forEach((button) => {
-    button.addEventListener("click", async () => {
-      state.queuePage = 1;
-      state.resultsPage = 1;
-      selectTask(button.dataset.taskId);
-      renderTaskList(tasks);
-      await refreshSelectedTask();
-    });
+  $("task-list").querySelectorAll("[data-id]").forEach((btn) => {
+    btn.addEventListener("click", () => { selectTask(btn.dataset.id); refreshSelectedTask(); });
   });
 }
 
+// 选择任务
 function selectTask(taskId) {
   state.selectedTaskId = taskId;
-  elements.selectedTaskLabel.textContent = taskId ? `当前任务: ${taskId}` : "未选择任务";
-  resetWordcloudPreview();
+  state.resultsPage = 1;
+  closeStream();
   startEventStream(taskId);
 }
 
+// 刷新选中任务
 async function refreshSelectedTask() {
-  if (!state.selectedTaskId) {
-    elements.detail.innerHTML = '<div class="empty-state">选择任务后显示详情</div>';
-    return;
-  }
-  const response = await apiFetch(`/v1/tasks/${encodeURIComponent(state.selectedTaskId)}`);
-  if (response.code !== 0 || !response.data) {
-    renderOutput(elements.commandOutput, response);
-    return;
-  }
-  const task = response.data;
-  elements.detail.innerHTML = [
-    detailCard("task_id", task.task_id),
-    detailCard("status", task.status),
-    detailCard("fetch_mode", task.fetch_mode || "http"),
-    detailCard("root_url", task.root_url),
-    detailCard("progress", `${task.progress}%`),
-    detailCard("done_count", String(task.done_count)),
-    detailCard("failed_count", String(task.failed_count)),
-    detailCard("total_count", String(task.total_count)),
-    detailCard("clean_done_count", String(task.clean_done_count)),
+  if (!state.selectedTaskId) return;
+  const res = await api(`/v1/tasks/${state.selectedTaskId}`);
+  if (res.code !== 0 || !res.data) return;
+  const t = res.data;
+  $("task-detail").innerHTML = [
+    detailItem("task_id", t.task_id),
+    detailItem("status", t.status),
+    detailItem("root_url", t.root_url),
+    detailItem("progress", `${t.progress}%`),
+    detailItem("done", String(t.done_count)),
+    detailItem("failed", String(t.failed_count)),
+    detailItem("total", String(t.total_count)),
+    detailItem("clean_done", String(t.clean_done_count)),
   ].join("");
-  await Promise.all([refreshQueue(), refreshResults()]);
+  await refreshResults();
 }
 
-async function refreshQueue() {
-  if (!state.selectedTaskId) {
-    return;
-  }
-  const response = await apiFetch(
-    `/v1/tasks/${encodeURIComponent(state.selectedTaskId)}/queue?state=${encodeURIComponent(state.queueState)}&page=${state.queuePage}&page_size=${state.queuePageSize}`,
-  );
-  if (response.code !== 0 || !response.data) {
-    renderOutput(elements.commandOutput, response);
-    return;
-  }
-  state.queueTotal = response.data.total;
-  renderQueueTable(response.data);
-}
-
+// 刷新结果
 async function refreshResults() {
-  if (!state.selectedTaskId) {
+  if (!state.selectedTaskId) return;
+  const url = `/v1/tasks/${state.selectedTaskId}/results?view=${state.resultsView}&page=${state.resultsPage}&page_size=15&q=${encodeURIComponent(state.resultsQuery)}`;
+  const res = await api(url);
+  if (res.code !== 0 || !res.data) return;
+  state.resultsTotal = res.data.total;
+  $("results-page-label").textContent = `${res.data.page} / ${totalPages(res.data.total)}`;
+  if (!res.data.items.length) {
+    $("results-table-wrap").innerHTML = '<div class="empty">当前页没有结果</div>';
     return;
   }
-  const response = await apiFetch(
-    `/v1/tasks/${encodeURIComponent(state.selectedTaskId)}/results?view=${encodeURIComponent(state.resultsView)}&page=${state.resultsPage}&page_size=${state.resultsPageSize}&q=${encodeURIComponent(state.resultsQuery)}`,
-  );
-  if (response.code !== 0 || !response.data) {
-    renderOutput(elements.commandOutput, response);
-    return;
-  }
-  state.resultsTotal = response.data.total;
-  renderResultsTable(response.data);
-}
-
-function renderQueueTable(queue) {
-  const counts = queue.counts_by_state || {};
-  elements.queueSummary.innerHTML = ["pending", "running", "done", "failed", "canceled"].map((name) => `
-    <div class="summary-pill">
-      <span>${escapeHtml(name)}</span>
-      <strong>${escapeHtml(String(counts[name] || 0))}</strong>
-    </div>
-  `).join("");
-  elements.queuePageLabel.textContent = `${queue.page} / ${totalPages(queue.total, queue.page_size)}`;
-  if (!queue.items.length) {
-    elements.queueTableWrap.innerHTML = '<div class="empty-state">当前页没有队列项</div>';
-    return;
-  }
-  elements.queueTableWrap.innerHTML = `
+  const isRaw = res.data.view === "raw";
+  $("results-table-wrap").innerHTML = `
     <table>
-      <thead><tr><th>ID</th><th>State</th><th>Hop</th><th>Retry</th><th>URL</th></tr></thead>
-      <tbody>
-        ${queue.items.map((item) => `
-          <tr>
-            <td>${escapeHtml(String(item.id))}</td>
-            <td>${escapeHtml(item.state)}</td>
-            <td>${escapeHtml(String(item.hop_count))}</td>
-            <td>${escapeHtml(String(item.retry_count))}</td>
-            <td>${escapeHtml(item.url)}</td>
-          </tr>
-        `).join("")}
-      </tbody>
+      <thead><tr><th>ID</th><th>日期</th><th>标题</th><th>内容</th><th>${isRaw ? "来源URL" : "去重键"}</th></tr></thead>
+      <tbody>${res.data.items.map((item) => {
+        const title = isRaw ? item.news_title : item.clean_news_title;
+        const date = isRaw ? item.news_date : item.clean_news_date;
+        const content = isRaw ? item.news_content : item.clean_news_content;
+        const extra = isRaw ? (item.source_url || "-") : (item.dedup_key || "-");
+        return `<tr><td>${esc(String(item.id))}</td><td>${esc(date || "-")}</td><td>${esc(title || "-")}</td><td>${esc(content || "-")}</td><td>${esc(extra)}</td></tr>`;
+      }).join("")}</tbody>
     </table>
   `;
 }
 
-function renderResultsTable(results) {
-  elements.resultsPageLabel.textContent = `${results.page} / ${totalPages(results.total, results.page_size)}`;
-  if (!results.items.length) {
-    elements.resultsTableWrap.innerHTML = '<div class="empty-state">当前页没有结果</div>';
-    return;
-  }
-  const rows = results.items.map((item) => {
-    const title = results.view === "raw" ? item.news_title : item.clean_news_title;
-    const date = results.view === "raw" ? item.news_date : item.clean_news_date;
-    const content = results.view === "raw" ? item.news_content : item.clean_news_content;
-    const source = results.view === "raw" ? (item.source_url || "-") : (item.dedup_key || "-");
-    return `
-      <tr>
-        <td>${escapeHtml(String(item.id))}</td>
-        <td>${escapeHtml(date || "-")}</td>
-        <td>${escapeHtml(title || "-")}</td>
-        <td>${escapeHtml(content || "-")}</td>
-        <td>${escapeHtml(source)}</td>
-      </tr>
-    `;
-  }).join("");
-  elements.resultsTableWrap.innerHTML = `
-    <table>
-      <thead><tr><th>ID</th><th>Date</th><th>Title</th><th>Content</th><th>${results.view === "raw" ? "Source URL" : "Dedup Key"}</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
-}
-
-function detailCard(label, value) {
-  return `<dl class="detail-card"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></dl>`;
-}
-
+// 事件流
 function startEventStream(taskId) {
-  if (state.eventSource) {
-    state.eventSource.close();
-    state.eventSource = null;
-  }
-  if (state.pendingLogFrame) {
-    window.cancelAnimationFrame(state.pendingLogFrame);
-    state.pendingLogFrame = null;
-  }
-  state.logQueue = [];
-  elements.eventsLog.innerHTML = "";
-  if (!taskId) {
-    elements.streamStatus.textContent = "未连接";
-    return;
-  }
-  const apiKeyQuery = state.apiKey ? `&api_key=${encodeURIComponent(state.apiKey)}` : "";
-  state.eventSource = new EventSource(`/v1/events/stream?task_id=${encodeURIComponent(taskId)}${apiKeyQuery}`);
-  elements.streamStatus.textContent = "连接中";
-  state.eventSource.onopen = () => { elements.streamStatus.textContent = "已连接"; };
-  state.eventSource.onerror = () => { elements.streamStatus.textContent = "连接结束"; };
-  state.eventSource.onmessage = (event) => {
-    enqueueLogLine(JSON.parse(event.data));
-    scheduleRealtimeRefresh();
+  if (!taskId) return;
+  $("stream-status").textContent = "连接中";
+  state.eventSource = new EventSource(`/v1/events/stream?task_id=${taskId}`);
+  state.eventSource.onopen = () => { $("stream-status").textContent = "已连接"; };
+  state.eventSource.onerror = () => { $("stream-status").textContent = "连接结束"; };
+  state.eventSource.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    const line = document.createElement("div");
+    line.className = "log-line";
+    line.textContent = `[${data.timestamp}] ${data.event_type} ${JSON.stringify(data.payload)}`;
+    $("events-log").prepend(line);
+    while ($("events-log").children.length > 100) $("events-log").removeChild($("events-log").lastChild);
+    // 刷新任务状态
+    if (state.selectedTaskId) {
+      refreshSelectedTask();
+    }
   };
 }
 
-function enqueueLogLine(payload) {
-  state.logQueue.unshift(payload);
-  if (state.pendingLogFrame) {
-    return;
-  }
-  state.pendingLogFrame = window.requestAnimationFrame(flushLogQueue);
+function closeStream() {
+  if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
 }
 
-function flushLogQueue() {
-  state.pendingLogFrame = null;
-  if (!state.logQueue.length) {
-    return;
-  }
-  const batch = state.logQueue.splice(0, MAX_LOG_LINES_PER_FRAME);
-  const fragment = document.createDocumentFragment();
-  batch.forEach((payload) => {
-    fragment.appendChild(buildLogLine(payload));
-  });
-  elements.eventsLog.prepend(fragment);
-  while (elements.eventsLog.children.length > MAX_EVENT_LOG_LINES) {
-    elements.eventsLog.removeChild(elements.eventsLog.lastElementChild);
-  }
-  if (state.logQueue.length) {
-    state.pendingLogFrame = window.requestAnimationFrame(flushLogQueue);
-  }
+// API 请求
+async function api(url, opts = {}) {
+  const resp = await fetch(url, { headers: { "Content-Type": "application/json", ...opts.headers }, ...opts });
+  return resp.json();
 }
 
-function buildLogLine(payload) {
-  const line = document.createElement("div");
-  line.className = "log-line";
-  line.textContent = `[${payload.timestamp}] ${payload.event_type} ${JSON.stringify(payload.payload)}`;
-  return line;
-}
-
-function scheduleRealtimeRefresh() {
-  if (state.realtimeRefreshTimer) {
-    state.pendingRealtimeRefresh = true;
-    return;
-  }
-  const elapsed = Date.now() - state.lastRealtimeRefreshAt;
-  const delay = Math.max(0, REALTIME_REFRESH_MIN_INTERVAL_MS - elapsed);
-  state.realtimeRefreshTimer = window.setTimeout(() => {
-    state.realtimeRefreshTimer = null;
-    void runRealtimeRefresh();
-  }, delay);
-}
-
-async function runRealtimeRefresh() {
-  if (state.refreshInFlight) {
-    state.pendingRealtimeRefresh = true;
-    return;
-  }
-  state.refreshInFlight = true;
-  state.lastRealtimeRefreshAt = Date.now();
-  try {
-    await loadTasks();
-    await refreshSelectedTask();
-  } finally {
-    state.refreshInFlight = false;
-    if (state.pendingRealtimeRefresh) {
-      state.pendingRealtimeRefresh = false;
-      scheduleRealtimeRefresh();
-    }
-  }
-}
-
-function resetWordcloudPreview() {
-  if (state.wordcloudUrl) {
-    URL.revokeObjectURL(state.wordcloudUrl);
-    state.wordcloudUrl = null;
-  }
-  elements.wordcloudPanel.classList.add("hidden");
-  elements.wordcloudImage.removeAttribute("src");
-  elements.wordcloudMeta.textContent = "尚未生成";
-}
-
-async function apiFetch(url, options = {}) {
-  const response = await fetch(url, { headers: buildHeaders(options.headers || {}), ...options });
-  return response.json();
-}
-
-function buildHeaders(extraHeaders = {}) {
-  const headers = { "Content-Type": "application/json", ...extraHeaders };
-  if (state.apiKey) {
-    headers.Authorization = `Bearer ${state.apiKey}`;
-    headers["X-API-Key"] = state.apiKey;
-  }
-  return headers;
-}
-
-function renderOutput(target, response) {
-  target.textContent = JSON.stringify(response, null, 2);
-}
-
-function totalPages(total, pageSize) {
-  return Math.max(1, Math.ceil(Number(total || 0) / Number(pageSize || 1)));
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
+// 辅助函数
+function showOutput(id, data) { $(id).textContent = JSON.stringify(data, null, 2); }
+function detailItem(label, value) { return `<dl class="detail-item"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></dl>`; }
+function totalPages(total) { return Math.max(1, Math.ceil(Number(total || 0) / 15)); }
+function esc(s) { return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"); }
 
 init();

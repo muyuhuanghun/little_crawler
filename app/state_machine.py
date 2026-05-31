@@ -1,3 +1,4 @@
+"""任务状态机：定义状态和允许的状态迁移。"""
 from __future__ import annotations
 
 from enum import Enum
@@ -12,14 +13,9 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
-TASK_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
+TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.PENDING: {TaskStatus.RUNNING},
-    TaskStatus.RUNNING: {
-        TaskStatus.PAUSED,
-        TaskStatus.STOPPED,
-        TaskStatus.SUCCESS,
-        TaskStatus.FAILED,
-    },
+    TaskStatus.RUNNING: {TaskStatus.PAUSED, TaskStatus.STOPPED, TaskStatus.SUCCESS, TaskStatus.FAILED},
     TaskStatus.PAUSED: {TaskStatus.RUNNING, TaskStatus.STOPPED},
     TaskStatus.STOPPED: set(),
     TaskStatus.SUCCESS: set(),
@@ -28,6 +24,4 @@ TASK_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
 
 
 def can_transition(current: str, target: str) -> bool:
-    current_status = TaskStatus(current)
-    target_status = TaskStatus(target)
-    return target_status in TASK_TRANSITIONS[current_status]
+    return TaskStatus(target) in TRANSITIONS[TaskStatus(current)]

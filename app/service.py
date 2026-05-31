@@ -1,3 +1,4 @@
+"""任务服务：创建、查询、删除任务，管理队列和事件日志。"""
 from __future__ import annotations
 
 import json
@@ -6,7 +7,6 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from app.config import get_settings
 from app.db import get_connection
 from app.errors import AppError
 from app.security import validate_target_url
@@ -18,17 +18,14 @@ DEFAULT_DEPTH = 1
 MAX_LIMIT = 1000
 MAX_DEPTH = 5
 QUEUE_STATES = {"pending", "running", "done", "failed", "canceled"}
-TERMINAL_EVENT_TYPES = {"task_finished", "task_stopped"}
-FETCH_MODES = {"http", "browser"}
-DEFAULT_QUEUE_PAGE = 1
+DELETABLE_STATUSES = {"success", "failed", "stopped"}
 
 
-@dataclass(slots=True)
+@dataclass
 class TaskRecord:
     task_id: str
     task_name: str | None
     root_url: str
-    fetch_mode: str
     status: str
     limit: int
     depth: int
@@ -48,132 +45,90 @@ class TaskRecord:
 
 
 def submit_task(payload: dict[str, Any]) -> dict[str, Any]:
-    url = validate_target_url(_require_string(payload, "url"))
-    limit = _normalize_int(payload.get("limit", DEFAULT_LIMIT), "limit", 1, MAX_LIMIT)
-    depth = _normalize_int(payload.get("depth", DEFAULT_DEPTH), "depth", 1, MAX_DEPTH)
+    """创建新任务并放入队列。"""
+    url = validate_target_url(_require_str(payload, "url"))
+    limit = _clamp_int(payload.get("limit", DEFAULT_LIMIT), "limit", 1, MAX_LIMIT)
+    depth = _clamp_int(payload.get("depth", DEFAULT_DEPTH), "depth", 1, MAX_DEPTH)
     task_name = payload.get("task_name")
     if task_name is not None and not isinstance(task_name, str):
         raise AppError(1001, "task_name must be a string")
-    fetch_mode = _normalize_fetch_mode(payload.get("renderer", payload.get("fetch_mode", "http")))
 
     task_id = f"task_{uuid.uuid4().hex[:12]}"
-    created_at = _now()
+    now = _now()
 
-    with get_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO tasks (
-                task_id, task_name, root_url, fetch_mode, status, limit_count, depth,
-                total_count, done_count, failed_count, clean_done_count,
-                created_at, started_at, ended_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                task_id,
-                task_name or task_id,
-                url,
-                fetch_mode,
-                TaskStatus.PENDING.value,
-                limit,
-                depth,
-                1,
-                0,
-                0,
-                0,
-                created_at,
-                None,
-                None,
-            ),
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO tasks (task_id, task_name, root_url, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, task_name or task_id, url, TaskStatus.PENDING.value, limit, depth, 1, 0, 0, 0, now, None, None),
         )
-        connection.execute(
-            """
-            INSERT INTO queue_items (
-                task_id, url, state, hop_count, retry_count, priority, next_run_at,
-                last_error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                task_id,
-                url,
-                "pending",
-                0,
-                0,
-                100,
-                None,
-                None,
-                created_at,
-                created_at,
-            ),
+        conn.execute(
+            "INSERT INTO queue_items (task_id, url, state, hop_count, retry_count, priority, last_error, created_at, updated_at) VALUES (?, ?, 'pending', ?, 0, 100, NULL, ?, ?)",
+            (task_id, url, 0, now, now),
         )
-        connection.execute(
-            """
-            INSERT INTO event_logs (task_id, event_type, payload_json, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                task_id,
-                "task_created",
-                json.dumps({"root_url": url, "queued_count": 1}, ensure_ascii=True),
-                created_at,
-            ),
+        conn.execute(
+            "INSERT INTO event_logs (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, "task_created", json.dumps({"root_url": url, "queued_count": 1}, ensure_ascii=True), now),
         )
-        _insert_event_log(
-            connection,
-            task_id,
-            "queue_enqueued",
-            {"url": url, "hop_count": 0},
-            created_at,
-        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
-    return {
-        "task_id": task_id,
-        "fetch_mode": fetch_mode,
-        "status": TaskStatus.PENDING.value,
-        "queued_count": 1,
-    }
+    return {"task_id": task_id, "status": TaskStatus.PENDING.value, "queued_count": 1}
 
 
 def list_tasks() -> list[dict[str, Any]]:
-    with get_connection() as connection:
-        rows = connection.execute(
-            """
-            SELECT
-                task_id, task_name, root_url, status, limit_count, depth,
-                fetch_mode,
-                total_count, done_count, failed_count, clean_done_count,
-                created_at, started_at, ended_at
-            FROM tasks
-            ORDER BY created_at DESC, task_id DESC
-            """
+    """列出所有任务。"""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT task_id, task_name, root_url, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at FROM tasks ORDER BY created_at DESC"
         ).fetchall()
-    return [_serialize_task(_row_to_task(row)) for row in rows]
+    finally:
+        conn.close()
+    return [_serialize_task(_row_to_task(r)) for r in rows]
 
 
 def get_task(task_id: str) -> dict[str, Any]:
-    with get_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT
-                task_id, task_name, root_url, status, limit_count, depth,
-                fetch_mode,
-                total_count, done_count, failed_count, clean_done_count,
-                created_at, started_at, ended_at
-            FROM tasks
-            WHERE task_id = ?
-            """,
+    """查询单个任务。"""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT task_id, task_name, root_url, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at FROM tasks WHERE task_id = ?",
             (task_id,),
         ).fetchone()
-
+    finally:
+        conn.close()
     if row is None:
         raise AppError(2001)
     return _serialize_task(_row_to_task(row))
 
 
-def transition_task(task_id: str, target_status: str) -> dict[str, Any]:
+def delete_task(task_id: str) -> dict[str, Any]:
+    """删除已结束的任务。"""
     task = _get_task_record(task_id)
+    if task.status not in DELETABLE_STATUSES:
+        raise AppError(2002, f"task status {task.status} is not deletable")
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"task_id": task_id, "deleted": True}
 
+
+def transition_task(task_id: str, target_status: str) -> dict[str, Any]:
+    """迁移任务状态。"""
+    task = _get_task_record(task_id)
     if not can_transition(task.status, target_status):
-        raise AppError(2002, f"cannot transition task from {task.status} to {target_status}")
+        raise AppError(2002, f"cannot transition from {task.status} to {target_status}")
 
     target = TaskStatus(target_status)
     now = _now()
@@ -191,177 +146,84 @@ def transition_task(task_id: str, target_status: str) -> dict[str, Any]:
         ended_at = now
         event_type = "task_stopped"
 
-    with get_connection() as connection:
-        connection.execute(
-            """
-            UPDATE tasks
-            SET status = ?, started_at = ?, ended_at = ?
-            WHERE task_id = ?
-            """,
-            (target.value, started_at, ended_at, task_id),
-        )
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE tasks SET status = ?, started_at = ?, ended_at = ? WHERE task_id = ?", (target.value, started_at, ended_at, task_id))
         if target == TaskStatus.STOPPED:
-            connection.execute(
-                """
-                UPDATE queue_items
-                SET state = 'canceled', updated_at = ?
-                WHERE task_id = ? AND state IN ('pending', 'running')
-                """,
-                (now, task_id),
-            )
-        _insert_event_log(
-            connection,
-            task_id,
-            event_type,
-            {"from": task.status, "to": target.value},
-            now,
+            conn.execute("UPDATE queue_items SET state = 'canceled', updated_at = ? WHERE task_id = ? AND state IN ('pending', 'running')", (now, task_id))
+        conn.execute(
+            "INSERT INTO event_logs (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, event_type, json.dumps({"from": task.status, "to": target.value}, ensure_ascii=True), now),
         )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     if target == TaskStatus.RUNNING:
         from app.worker import notify_queue_runner
-
         notify_queue_runner()
 
     return get_task(task_id)
 
 
-def list_queue_items(
-    task_id: str,
-    state: str | None = None,
-    page: int = DEFAULT_QUEUE_PAGE,
-    page_size: int | None = None,
-) -> dict[str, Any]:
+def list_queue_items(task_id: str, state: str | None = None, page: int = 1) -> dict[str, Any]:
+    """列出任务的队列项（分页）。"""
     _ensure_task_exists(task_id)
-    normalized_state = None
-    if state is not None:
-        normalized_state = state.strip().lower()
-        if normalized_state == "all":
-            normalized_state = None
-        elif normalized_state not in QUEUE_STATES:
-            raise AppError(1001, "state must be one of pending, running, done, failed, canceled, all")
-    settings = get_settings()
-    normalized_page = _normalize_int(page, "page", 1, 1_000_000)
-    normalized_page_size = _normalize_int(
-        settings.queue_page_size_default if page_size is None else page_size,
-        "page_size",
-        1,
-        settings.queue_page_size_max,
-    )
-    offset = (normalized_page - 1) * normalized_page_size
+    page = max(1, int(page))
+    page_size = 20
+    offset = (page - 1) * page_size
 
-    with get_connection() as connection:
-        total_row = connection.execute(
-            """
-            SELECT COUNT(*) AS total
-            FROM queue_items
-            WHERE task_id = ?
-            """
-            if normalized_state is None
-            else """
-            SELECT COUNT(*) AS total
-            FROM queue_items
-            WHERE task_id = ? AND state = ?
-            """,
-            (task_id,) if normalized_state is None else (task_id, normalized_state),
-        ).fetchone()
-        count_rows = connection.execute(
-            """
-            SELECT state, COUNT(*) AS total
-            FROM queue_items
-            WHERE task_id = ?
-            GROUP BY state
-            """,
+    conn = get_connection()
+    try:
+        total_row = conn.execute("SELECT COUNT(*) AS c FROM queue_items WHERE task_id = ?", (task_id,)).fetchone()
+        rows = conn.execute(
+            "SELECT id, url, state, hop_count, retry_count, last_error, updated_at FROM queue_items WHERE task_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
+            (task_id, page_size, offset),
+        ).fetchall()
+        counts = conn.execute(
+            "SELECT state, COUNT(*) AS c FROM queue_items WHERE task_id = ? GROUP BY state",
             (task_id,),
         ).fetchall()
-        if normalized_state is None:
-            rows = connection.execute(
-                """
-                SELECT id, url, state, hop_count, retry_count, next_run_at, last_error, updated_at
-                FROM queue_items
-                WHERE task_id = ?
-                ORDER BY id ASC
-                LIMIT ? OFFSET ?
-                """,
-                (task_id, normalized_page_size, offset),
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                """
-                SELECT id, url, state, hop_count, retry_count, next_run_at, last_error, updated_at
-                FROM queue_items
-                WHERE task_id = ? AND state = ?
-                ORDER BY id ASC
-                LIMIT ? OFFSET ?
-                """,
-                (task_id, normalized_state, normalized_page_size, offset),
-            ).fetchall()
+    finally:
+        conn.close()
 
-    items = [
-        {
-            "id": row["id"],
-            "url": row["url"],
-            "state": row["state"],
-            "hop_count": row["hop_count"],
-            "retry_count": row["retry_count"],
-            "next_run_at": row["next_run_at"],
-            "last_error": row["last_error"],
-            "updated_at": row["updated_at"],
-        }
-        for row in rows
-    ]
-    counts_by_state = {row["state"]: row["total"] for row in count_rows}
+    items = [{"id": r["id"], "url": r["url"], "state": r["state"], "hop_count": r["hop_count"], "retry_count": r["retry_count"], "last_error": r["last_error"], "updated_at": r["updated_at"]} for r in rows]
+    counts_by_state = {r["state"]: r["c"] for r in counts}
     return {
-        "task_id": task_id,
-        "state": normalized_state or "all",
-        "page": normalized_page,
-        "page_size": normalized_page_size,
-        "total": total_row["total"],
-        "counts_by_state": {
-            queue_state: counts_by_state.get(queue_state, 0)
-            for queue_state in ("pending", "running", "done", "failed", "canceled")
-        },
+        "task_id": task_id, "page": page, "page_size": page_size,
+        "total": total_row["c"],
+        "counts_by_state": {s: counts_by_state.get(s, 0) for s in ("pending", "running", "done", "failed", "canceled")},
         "items": items,
     }
 
 
+def list_event_logs(task_id: str, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    """列出任务事件日志。"""
+    _ensure_task_exists(task_id)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, event_type, payload_json, created_at FROM event_logs WHERE task_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
+            (task_id, after_id, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [{"id": r["id"], "task_id": task_id, "event_type": r["event_type"], "timestamp": r["created_at"], "payload": json.loads(r["payload_json"])} for r in rows]
+
+
 def log_command(request_id: str, command: str, result_code: int, result_message: str) -> None:
-    with get_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO command_logs (request_id, command, result_code, result_message, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO command_logs (request_id, command, result_code, result_message, created_at) VALUES (?, ?, ?, ?, ?)",
             (request_id, command, result_code, result_message, _now()),
         )
-
-
-def list_event_logs(task_id: str, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
-    _ensure_task_exists(task_id)
-    normalized_after_id = _normalize_int(after_id, "after_id", 0, 1_000_000_000)
-    normalized_limit = _normalize_int(limit, "limit", 1, 1000)
-
-    with get_connection() as connection:
-        rows = connection.execute(
-            """
-            SELECT id, event_type, payload_json, created_at
-            FROM event_logs
-            WHERE task_id = ? AND id > ?
-            ORDER BY id ASC
-            LIMIT ?
-            """,
-            (task_id, normalized_after_id, normalized_limit),
-        ).fetchall()
-
-    return [
-        {
-            "id": row["id"],
-            "task_id": task_id,
-            "event_type": row["event_type"],
-            "timestamp": row["created_at"],
-            "payload": json.loads(row["payload_json"]),
-        }
-        for row in rows
-    ]
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _serialize_task(task: TaskRecord) -> dict[str, Any]:
@@ -373,36 +235,23 @@ def _serialize_task(task: TaskRecord) -> dict[str, Any]:
 
 def _row_to_task(row: Any) -> TaskRecord:
     return TaskRecord(
-        task_id=row["task_id"],
-        task_name=row["task_name"],
-        root_url=row["root_url"],
-        fetch_mode=row["fetch_mode"],
-        status=row["status"],
-        limit=row["limit_count"],
-        depth=row["depth"],
-        total_count=row["total_count"],
-        done_count=row["done_count"],
-        failed_count=row["failed_count"],
-        clean_done_count=row["clean_done_count"],
-        created_at=row["created_at"],
-        started_at=row["started_at"],
-        ended_at=row["ended_at"],
+        task_id=row["task_id"], task_name=row["task_name"], root_url=row["root_url"],
+        status=row["status"], limit=row["limit_count"], depth=row["depth"],
+        total_count=row["total_count"], done_count=row["done_count"],
+        failed_count=row["failed_count"], clean_done_count=row["clean_done_count"],
+        created_at=row["created_at"], started_at=row["started_at"], ended_at=row["ended_at"],
     )
 
 
 def _get_task_record(task_id: str) -> TaskRecord:
-    with get_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT
-                task_id, task_name, root_url, fetch_mode, status, limit_count, depth,
-                total_count, done_count, failed_count, clean_done_count,
-                created_at, started_at, ended_at
-            FROM tasks
-            WHERE task_id = ?
-            """,
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT task_id, task_name, root_url, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at FROM tasks WHERE task_id = ?",
             (task_id,),
         ).fetchone()
+    finally:
+        conn.close()
     if row is None:
         raise AppError(2001)
     return _row_to_task(row)
@@ -412,42 +261,21 @@ def _ensure_task_exists(task_id: str) -> None:
     _get_task_record(task_id)
 
 
-def _insert_event_log(connection: Any, task_id: str, event_type: str, payload: dict[str, Any], created_at: str) -> None:
-    connection.execute(
-        """
-        INSERT INTO event_logs (task_id, event_type, payload_json, created_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        (task_id, event_type, json.dumps(payload, ensure_ascii=True), created_at),
-    )
-
-
-def _require_string(payload: dict[str, Any], field: str) -> str:
+def _require_str(payload: dict[str, Any], field: str) -> str:
     value = payload.get(field)
     if not isinstance(value, str) or not value.strip():
         raise AppError(1001, f"{field} is required")
     return value.strip()
 
 
-def _normalize_int(value: Any, field: str, minimum: int, maximum: int) -> int:
-    if isinstance(value, bool):
-        raise AppError(1001, f"{field} must be an integer")
+def _clamp_int(value: Any, field: str, lo: int, hi: int) -> int:
     try:
-        normalized = int(value)
-    except (TypeError, ValueError) as exc:
-        raise AppError(1001, f"{field} must be an integer") from exc
-    if normalized < minimum or normalized > maximum:
-        raise AppError(1001, f"{field} must be between {minimum} and {maximum}")
-    return normalized
-
-
-def _normalize_fetch_mode(value: Any) -> str:
-    if not isinstance(value, str):
-        raise AppError(1001, "renderer must be one of http, browser")
-    normalized = value.strip().lower()
-    if normalized not in FETCH_MODES:
-        raise AppError(1001, "renderer must be one of http, browser")
-    return normalized
+        n = int(value)
+    except (TypeError, ValueError):
+        raise AppError(1001, f"{field} must be an integer")
+    if n < lo or n > hi:
+        raise AppError(1001, f"{field} must be between {lo} and {hi}")
+    return n
 
 
 def _now() -> str:

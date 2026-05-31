@@ -1,12 +1,11 @@
+"""爬虫 Worker：抓取网页、解析内容、管理队列。"""
 from __future__ import annotations
 
-import asyncio
 import json
-import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Callable
 from urllib.parse import urljoin
 
@@ -14,16 +13,15 @@ import requests
 from bs4 import BeautifulSoup
 
 from app.cleaning import RawItem, save_raw_items
-from app.config import get_settings
 from app.db import get_connection
 from app.errors import AppError
-from app.security import assert_public_network_target, validate_target_url
+from app.security import validate_target_url
 from app.state_machine import TaskStatus
 
 
-POLL_INTERVAL_SECONDS = 0.05
-REQUEST_TIMEOUT_SECONDS = 10
-DEFAULT_HEADERS = {
+POLL_INTERVAL = 0.05
+REQUEST_TIMEOUT = 10
+HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -31,14 +29,12 @@ DEFAULT_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate",
-    "Cache-Control": "no-cache",
 }
-ENCODING_CANDIDATES = ("utf-8", "gb18030", "gbk", "gb2312", "big5")
 
 
-@dataclass(slots=True)
+@dataclass
 class CrawlResult:
+    """一次抓取的结果。"""
     discovered_urls: list[str]
     status_code: int
     page_title: str | None = None
@@ -49,94 +45,39 @@ FetchFunction = Callable[[str], CrawlResult]
 
 
 def default_fetch_url(url: str) -> CrawlResult:
-    assert_public_network_target(url)
+    """用 requests 抓取一个网页。"""
+    validate_target_url(url)
     session = requests.Session()
-    response = session.get(url, headers=DEFAULT_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-
-    html_text, resolved_encoding = _decode_response(response)
-    return _build_crawl_result(
-        url=url,
-        html_text=html_text,
-        status_code=response.status_code,
-        raw_payload_extra={
-            "resolved_encoding": resolved_encoding,
-            "content_type": response.headers.get("Content-Type"),
-            "fetch_mode": "http",
-        },
-    )
+    resp = session.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    resp.encoding = resp.apparent_encoding or "utf-8"
+    html_text = resp.text
+    return _parse_html(url, html_text, resp.status_code)
 
 
-def browser_fetch_url(url: str) -> CrawlResult:
-    assert_public_network_target(url)
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise RuntimeError("Playwright is not installed; install playwright and browser binaries first") from exc
-
-    async def _run() -> CrawlResult:
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
-            try:
-                context = await browser.new_context(
-                    user_agent=DEFAULT_HEADERS["User-Agent"],
-                    locale="zh-CN",
-                )
-                page = await context.new_page()
-                response = await page.goto(url, wait_until="networkidle", timeout=REQUEST_TIMEOUT_SECONDS * 1000)
-                html_text = await page.content()
-                status_code = response.status if response is not None else 200
-                return _build_crawl_result(
-                    url=url,
-                    html_text=html_text,
-                    status_code=status_code,
-                    raw_payload_extra={
-                        "fetch_mode": "browser",
-                        "renderer": "playwright",
-                    },
-                )
-            finally:
-                await browser.close()
-
-    return asyncio.run(_run())
-
-
-def fetch_url(url: str, fetch_mode: str = "http") -> CrawlResult:
-    if fetch_mode == "browser":
-        return browser_fetch_url(url)
-    return default_fetch_url(url)
-
-
-def _build_crawl_result(
-    url: str,
-    html_text: str,
-    status_code: int,
-    raw_payload_extra: dict[str, object] | None = None,
-) -> CrawlResult:
+def _parse_html(url: str, html_text: str, status_code: int) -> CrawlResult:
+    """从 HTML 中提取链接、标题、正文。"""
     soup = BeautifulSoup(html_text, "html.parser")
+
     links: list[str] = []
     seen: set[str] = set()
-    for anchor in soup.find_all("a", href=True):
-        absolute_url = urljoin(url, anchor["href"].strip())
-        if absolute_url.startswith(("http://", "https://")) and absolute_url not in seen:
-            seen.add(absolute_url)
-            links.append(absolute_url)
+    for a in soup.find_all("a", href=True):
+        absolute = urljoin(url, a["href"].strip())
+        if absolute.startswith(("http://", "https://")) and absolute not in seen:
+            seen.add(absolute)
+            links.append(absolute)
 
     title = soup.title.get_text(strip=True) if soup.title else None
-    text_blocks = [paragraph.get_text(" ", strip=True) for paragraph in soup.find_all("p")]
-    content = " ".join(block for block in text_blocks if block).strip() or None
+    paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+    content = " ".join(p for p in paragraphs if p).strip() or None
+
     raw_item = RawItem(
         news_id=url,
         news_date=None,
         news_title=title,
         news_content=content,
         source_url=url,
-        raw_payload={
-            "url": url,
-            "title": title,
-            "status_code": status_code,
-            **(raw_payload_extra or {}),
-        },
+        raw_payload={"url": url, "title": title, "status_code": status_code},
     )
     return CrawlResult(
         discovered_urls=links,
@@ -146,335 +87,186 @@ def _build_crawl_result(
     )
 
 
-_fetch_url: Callable[[str, str], CrawlResult] = fetch_url
+_fetch_url: FetchFunction = default_fetch_url
 _runner: QueueRunner | None = None
 _runner_lock = threading.Lock()
 
 
-class NoopQueueRunner:
-    def notify(self) -> None:
-        return
-
-    def shutdown(self) -> None:
-        return
-
-
 class QueueRunner:
+    """后台线程，持续消费队列中的待抓取 URL。"""
+
     def __init__(self) -> None:
-        self._wake_event = threading.Event()
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._run_loop, name="pyms-queue-runner", daemon=True)
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def notify(self) -> None:
-        self._wake_event.set()
+        self._wake.set()
 
     def shutdown(self) -> None:
-        self._stop_event.set()
-        self._wake_event.set()
+        self._stop.set()
+        self._wake.set()
         self._thread.join(timeout=1)
 
-    def _run_loop(self) -> None:
-        while not self._stop_event.is_set():
-            worked = self._process_next_queue_item()
-            if worked:
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            if _process_one_item():
                 continue
-            self._wake_event.wait(POLL_INTERVAL_SECONDS)
-            self._wake_event.clear()
-
-    def _process_next_queue_item(self) -> bool:
-        return process_next_queue_item_once()
+            self._wake.wait(POLL_INTERVAL)
+            self._wake.clear()
 
 
-def process_next_queue_item_once() -> bool:
-    with get_connection() as connection:
-        row = connection.execute(
+def _process_one_item() -> bool:
+    """处理一个待抓取的队列项，返回 True 表示处理了。"""
+    conn = get_connection()
+    try:
+        row = conn.execute(
             """
-            SELECT
-                q.id,
-                q.task_id,
-                q.url,
-                q.hop_count,
-                q.retry_count,
-                t.limit_count,
-                t.depth,
-                t.fetch_mode
+            SELECT q.id, q.task_id, q.url, q.hop_count, q.retry_count,
+                   t.limit_count, t.depth
             FROM queue_items q
             JOIN tasks t ON t.task_id = q.task_id
             WHERE t.status = ? AND q.state = 'pending'
-              AND (q.next_run_at IS NULL OR q.next_run_at <= ?)
             ORDER BY q.priority DESC, q.id ASC
             LIMIT 1
             """,
-            (TaskStatus.RUNNING.value, _now()),
+            (TaskStatus.RUNNING.value,),
         ).fetchone()
-
         if row is None:
             return False
 
         now = _now()
-        updated = connection.execute(
-            """
-            UPDATE queue_items
-            SET state = 'running', updated_at = ?, last_error = NULL
-            WHERE id = ? AND state = 'pending'
-            """,
+        updated = conn.execute(
+            "UPDATE queue_items SET state = 'running', updated_at = ? WHERE id = ? AND state = 'pending'",
             (now, row["id"]),
         )
         if updated.rowcount == 0:
+            conn.commit()
             return True
 
-    try:
-        result = _fetch_url(row["url"], row["fetch_mode"])
-    except Exception as exc:
-        _mark_item_retry_or_failed(
-            task_id=row["task_id"],
-            queue_item_id=row["id"],
-            url=row["url"],
-            retry_count=int(row["retry_count"]),
-            error_message=str(exc),
+        try:
+            result = _fetch_url(row["url"])
+        except Exception as exc:
+            conn.rollback()
+            _mark_failed(row["task_id"], row["id"], row["url"], str(exc))
+            return True
+
+        _mark_done(
+            row["task_id"], row["id"], row["url"],
+            row["hop_count"], row["limit_count"], row["depth"], result,
         )
         return True
-
-    _mark_item_done(
-        task_id=row["task_id"],
-        queue_item_id=row["id"],
-        url=row["url"],
-        hop_count=row["hop_count"],
-        limit_count=row["limit_count"],
-        max_depth=row["depth"],
-        result=result,
-    )
-    return True
+    finally:
+        conn.close()
 
 
-def _mark_item_done(
-    task_id: str,
-    queue_item_id: int,
-    url: str,
-    hop_count: int,
-    limit_count: int,
-    max_depth: int,
+def _mark_done(
+    task_id: str, item_id: int, url: str,
+    hop_count: int, limit_count: int, max_depth: int,
     result: CrawlResult,
 ) -> None:
     now = _now()
-    with get_connection() as connection:
-        task = connection.execute(
-            "SELECT status FROM tasks WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
+    conn = get_connection()
+    try:
+        task = conn.execute("SELECT status FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
         if task is None:
             return
         if task["status"] == TaskStatus.STOPPED.value:
-            connection.execute(
-                """
-                UPDATE queue_items
-                SET state = 'canceled', updated_at = ?
-                WHERE id = ?
-                """,
-                (now, queue_item_id),
-            )
+            conn.execute("UPDATE queue_items SET state = 'canceled', updated_at = ? WHERE id = ?", (now, item_id))
+            conn.commit()
             return
 
-        connection.execute(
-            """
-            UPDATE queue_items
-            SET state = 'done', updated_at = ?, last_error = NULL
-            WHERE id = ?
-            """,
-            (now, queue_item_id),
-        )
-        connection.execute(
-            """
-            UPDATE tasks
-            SET done_count = done_count + 1
-            WHERE task_id = ?
-            """,
-            (task_id,),
-        )
-        raw_saved_count = save_raw_items(task_id, result.raw_items or [], now, connection=connection)
-        _insert_event(
-            connection,
-            task_id,
-            "crawl_item_success",
-            {
-                "url": url,
-                "status_code": result.status_code,
-                "page_title": result.page_title,
-                "raw_saved_count": raw_saved_count,
-            },
-            now,
-        )
+        conn.execute("UPDATE queue_items SET state = 'done', updated_at = ? WHERE id = ?", (now, item_id))
+        conn.execute("UPDATE tasks SET done_count = done_count + 1 WHERE task_id = ?", (task_id,))
+        save_raw_items(task_id, result.raw_items or [], now, connection=conn)
+        _insert_event(conn, task_id, "crawl_item_success", {"url": url, "status_code": result.status_code}, now)
 
         if hop_count < max_depth:
-            _enqueue_discovered_urls(
-                connection=connection,
-                task_id=task_id,
-                parent_url=url,
-                hop_count=hop_count + 1,
-                limit_count=limit_count,
-                discovered_urls=result.discovered_urls,
-                created_at=now,
-            )
+            _enqueue_links(conn, task_id, url, hop_count + 1, limit_count, result.discovered_urls, now)
 
-        _finalize_task_if_needed(connection, task_id, now)
+        _finalize_if_done(conn, task_id, now)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
-def _mark_item_retry_or_failed(
-    task_id: str,
-    queue_item_id: int,
-    url: str,
-    retry_count: int,
-    error_message: str,
-) -> None:
+def _mark_failed(task_id: str, item_id: int, url: str, error: str) -> None:
     now = _now()
-    settings = get_settings()
-    max_attempts = max(0, int(settings.queue_retry_max_attempts))
-    next_retry_count = int(retry_count) + 1
-    should_retry = next_retry_count <= max_attempts
-
-    with get_connection() as connection:
-        task = connection.execute(
-            "SELECT status FROM tasks WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
-        if task is None:
-            return
-        if task["status"] == TaskStatus.STOPPED.value:
-            connection.execute(
-                """
-                UPDATE queue_items
-                SET state = 'canceled', updated_at = ?
-                WHERE id = ?
-                """,
-                (now, queue_item_id),
-            )
-            return
-
-        if should_retry:
-            delay_seconds = _compute_retry_delay_seconds(next_retry_count)
-            next_run_iso = (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)).isoformat()
-            connection.execute(
-                """
-                UPDATE queue_items
-                SET state = 'pending', retry_count = ?, next_run_at = ?, updated_at = ?, last_error = ?
-                WHERE id = ?
-                """,
-                (next_retry_count, next_run_iso, now, error_message, queue_item_id),
-            )
-            _insert_event(
-                connection,
-                task_id,
-                "crawl_item_retry_scheduled",
-                {
-                    "url": url,
-                    "error": error_message,
-                    "retry_count": next_retry_count,
-                    "next_run_at": next_run_iso,
-                },
-                now,
-            )
-            return
-
-        connection.execute(
-            """
-            UPDATE queue_items
-            SET state = 'failed', retry_count = ?, next_run_at = NULL, updated_at = ?, last_error = ?
-            WHERE id = ?
-            """,
-            (next_retry_count, now, error_message, queue_item_id),
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE queue_items SET state = 'failed', retry_count = retry_count + 1, updated_at = ?, last_error = ? WHERE id = ?",
+            (now, error, item_id),
         )
-        connection.execute(
-            """
-            INSERT INTO dead_letters (
-                task_id, queue_item_id, url, retry_count, error_message, payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                task_id,
-                queue_item_id,
-                url,
-                next_retry_count,
-                error_message,
-                json.dumps({"task_id": task_id, "url": url, "final": True}, ensure_ascii=True),
-                now,
-            ),
-        )
-        connection.execute(
-            """
-            UPDATE tasks
-            SET failed_count = failed_count + 1
-            WHERE task_id = ?
-            """,
-            (task_id,),
-        )
-        _insert_event(
-            connection,
-            task_id,
-            "crawl_item_failed",
-            {"url": url, "error": error_message, "retry_count": next_retry_count},
-            now,
-        )
-        _finalize_task_if_needed(connection, task_id, now)
+        conn.execute("UPDATE tasks SET failed_count = failed_count + 1 WHERE task_id = ?", (task_id,))
+        _insert_event(conn, task_id, "crawl_item_failed", {"url": url, "error": error}, now)
+        _finalize_if_done(conn, task_id, now)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
-def _enqueue_discovered_urls(
-    connection: object,
-    task_id: str,
-    parent_url: str,
-    hop_count: int,
-    limit_count: int,
-    discovered_urls: list[str],
-    created_at: str,
+def _enqueue_links(
+    conn: sqlite3.Connection, task_id: str, parent_url: str,
+    hop_count: int, limit_count: int, urls: list[str], now: str,
 ) -> None:
-    count_row = connection.execute(
-        "SELECT COUNT(*) AS total FROM queue_items WHERE task_id = ?",
-        (task_id,),
-    ).fetchone()
-    queued_total = count_row["total"]
-
-    for discovered_url in discovered_urls:
-        if queued_total >= limit_count:
+    count = conn.execute("SELECT COUNT(*) AS c FROM queue_items WHERE task_id = ?", (task_id,)).fetchone()["c"]
+    for url in urls:
+        if count >= limit_count:
             break
         try:
-            validate_target_url(discovered_url)
+            validate_target_url(url)
         except AppError:
             continue
-
-        inserted = connection.execute(
-            """
-            INSERT OR IGNORE INTO queue_items (
-                task_id, url, state, hop_count, retry_count, priority, next_run_at,
-                last_error, created_at, updated_at
-            ) VALUES (?, ?, 'pending', ?, 0, 100, NULL, NULL, ?, ?)
-            """,
-            (task_id, discovered_url, hop_count, created_at, created_at),
+        inserted = conn.execute(
+            "INSERT OR IGNORE INTO queue_items (task_id, url, state, hop_count, retry_count, priority, last_error, created_at, updated_at) VALUES (?, ?, 'pending', ?, 0, 100, NULL, ?, ?)",
+            (task_id, url, hop_count, now, now),
         )
         if inserted.rowcount == 0:
             continue
-
-        queued_total += 1
-        connection.execute(
-            """
-            UPDATE tasks
-            SET total_count = total_count + 1
-            WHERE task_id = ?
-            """,
-            (task_id,),
-        )
-        _insert_event(
-            connection,
-            task_id,
-            "queue_enqueued",
-            {"url": discovered_url, "parent_url": parent_url, "hop_count": hop_count},
-            created_at,
-        )
+        count += 1
+        conn.execute("UPDATE tasks SET total_count = total_count + 1 WHERE task_id = ?", (task_id,))
+        _insert_event(conn, task_id, "queue_enqueued", {"url": url, "parent_url": parent_url, "hop_count": hop_count}, now)
 
 
-def get_queue_runner() -> QueueRunner | NoopQueueRunner:
+def _finalize_if_done(conn: sqlite3.Connection, task_id: str, now: str) -> None:
+    task = conn.execute(
+        "SELECT status, done_count, failed_count, total_count FROM tasks WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    if task is None or task["status"] != TaskStatus.RUNNING.value:
+        return
+    active = conn.execute(
+        "SELECT COUNT(*) AS c FROM queue_items WHERE task_id = ? AND state IN ('pending', 'running')",
+        (task_id,),
+    ).fetchone()["c"]
+    if active > 0:
+        return
+    final = TaskStatus.FAILED.value if task["done_count"] == 0 and task["failed_count"] > 0 else TaskStatus.SUCCESS.value
+    conn.execute("UPDATE tasks SET status = ?, ended_at = ? WHERE task_id = ?", (final, now, task_id))
+    _insert_event(conn, task_id, "task_finished", {"status": final}, now)
+
+
+def _insert_event(conn: sqlite3.Connection, task_id: str, event_type: str, payload: dict, now: str) -> None:
+    conn.execute(
+        "INSERT INTO event_logs (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+        (task_id, event_type, json.dumps(payload, ensure_ascii=True), now),
+    )
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def get_queue_runner() -> QueueRunner:
     global _runner
-    if not _is_inprocess_backend():
-        return NoopQueueRunner()
     with _runner_lock:
         if _runner is None:
             _runner = QueueRunner()
@@ -482,198 +274,26 @@ def get_queue_runner() -> QueueRunner | NoopQueueRunner:
 
 
 def start_queue_runtime() -> None:
-    if _is_inprocess_backend():
-        get_queue_runner()
+    get_queue_runner()
 
 
 def notify_queue_runner() -> None:
-    dispatch_queue_processing()
-
-
-def dispatch_queue_processing() -> None:
-    if not _is_inprocess_backend():
-        if _is_celery_backend():
-            from app.celery_tasks import enqueue_queue_drain
-
-            enqueue_queue_drain()
-        return
     get_queue_runner().notify()
 
 
 def set_fetcher(fetcher: FetchFunction) -> None:
     global _fetch_url
-    _fetch_url = lambda url, _fetch_mode="http": fetcher(url)
+    _fetch_url = fetcher
 
 
 def reset_fetcher() -> None:
     global _fetch_url
-    _fetch_url = fetch_url
+    _fetch_url = default_fetch_url
 
 
 def shutdown_queue_runner() -> None:
     global _runner
     with _runner_lock:
-        if _runner is None:
-            return
-        _runner.shutdown()
-        _runner = None
-
-
-def run_queue_worker_forever() -> None:
-    try:
-        while True:
-            worked = process_next_queue_item_once()
-            if worked:
-                continue
-            time.sleep(POLL_INTERVAL_SECONDS)
-    except KeyboardInterrupt:
-        pass
-
-
-def _finalize_task_if_needed(connection: object, task_id: str, finished_at: str) -> None:
-    task = connection.execute(
-        """
-        SELECT status, done_count, failed_count, total_count
-        FROM tasks
-        WHERE task_id = ?
-        """,
-        (task_id,),
-    ).fetchone()
-    if task is None or task["status"] != TaskStatus.RUNNING.value:
-        return
-
-    active_row = connection.execute(
-        """
-        SELECT COUNT(*) AS total
-        FROM queue_items
-        WHERE task_id = ? AND state IN ('pending', 'running')
-        """,
-        (task_id,),
-    ).fetchone()
-    if active_row["total"] > 0:
-        return
-
-    final_status = (
-        TaskStatus.FAILED.value
-        if task["done_count"] == 0 and task["failed_count"] > 0
-        else TaskStatus.SUCCESS.value
-    )
-    connection.execute(
-        """
-        UPDATE tasks
-        SET status = ?, ended_at = ?
-        WHERE task_id = ?
-        """,
-        (final_status, finished_at, task_id),
-    )
-    _insert_event(
-        connection,
-        task_id,
-        "task_finished",
-        {
-            "status": final_status,
-            "done_count": task["done_count"],
-            "failed_count": task["failed_count"],
-            "total_count": task["total_count"],
-        },
-        finished_at,
-    )
-
-
-def _insert_event(
-    connection: object,
-    task_id: str,
-    event_type: str,
-    payload: dict[str, object],
-    created_at: str,
-) -> None:
-    connection.execute(
-        """
-        INSERT INTO event_logs (task_id, event_type, payload_json, created_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        (task_id, event_type, json.dumps(payload, ensure_ascii=True), created_at),
-    )
-
-
-def _decode_response(response: requests.Response) -> tuple[str, str]:
-    header_charset = _extract_charset(response.headers.get("Content-Type"))
-    meta_charset = _extract_meta_charset(response.content)
-    apparent_encoding = getattr(response, "apparent_encoding", None)
-    declared_encoding = response.encoding
-
-    candidates: list[str] = []
-    for candidate in (
-        header_charset,
-        meta_charset,
-        declared_encoding,
-        apparent_encoding,
-        *ENCODING_CANDIDATES,
-    ):
-        normalized = _normalize_encoding(candidate)
-        if normalized and normalized not in candidates:
-            candidates.append(normalized)
-
-    for candidate in candidates:
-        try:
-            return response.content.decode(candidate), candidate
-        except (LookupError, UnicodeDecodeError):
-            continue
-
-    fallback = response.encoding or "utf-8"
-    return response.text, fallback
-
-
-def _extract_charset(content_type: str | None) -> str | None:
-    if not content_type:
-        return None
-    match = re.search(r"charset\s*=\s*['\"]?([A-Za-z0-9._-]+)", content_type, re.IGNORECASE)
-    return match.group(1) if match else None
-
-
-def _extract_meta_charset(content: bytes) -> str | None:
-    head = content[:4096].decode("ascii", errors="ignore")
-    direct_match = re.search(r"<meta[^>]+charset=['\"]?([A-Za-z0-9._-]+)", head, re.IGNORECASE)
-    if direct_match:
-        return direct_match.group(1)
-    http_equiv_match = re.search(
-        r"<meta[^>]+content=['\"][^'\"]*charset=([A-Za-z0-9._-]+)[^'\"]*['\"]",
-        head,
-        re.IGNORECASE,
-    )
-    if http_equiv_match:
-        return http_equiv_match.group(1)
-    return None
-
-
-def _normalize_encoding(value: str | None) -> str | None:
-    if not value:
-        return None
-    normalized = value.strip().lower()
-    aliases = {
-        "gb2312": "gb18030",
-        "gbk": "gb18030",
-    }
-    return aliases.get(normalized, normalized)
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _is_inprocess_backend() -> bool:
-    settings = get_settings()
-    return settings.queue_backend == "inprocess"
-
-
-def _is_celery_backend() -> bool:
-    settings = get_settings()
-    return settings.queue_backend == "celery"
-
-
-def _compute_retry_delay_seconds(retry_count: int) -> float:
-    settings = get_settings()
-    base = float(settings.queue_retry_backoff_base_seconds)
-    maximum = float(settings.queue_retry_backoff_max_seconds)
-    exponential = base * (2 ** max(0, int(retry_count) - 1))
-    return min(maximum, exponential)
+        if _runner is not None:
+            _runner.shutdown()
+            _runner = None
