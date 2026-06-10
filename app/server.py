@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.cleaning import export_results, list_results
+from app.cleaning import export_results, generate_wordcloud, list_results
 from app.command_engine import execute_command
 from app.config import get_settings
 from app.db import init_db
@@ -39,6 +39,7 @@ class SubmitTaskRequest(BaseModel):
     limit: int = Field(default=DEFAULT_LIMIT, ge=1, le=1000)
     depth: int = Field(default=DEFAULT_DEPTH, ge=1, le=5)
     task_name: str | None = None
+    keyword: str | None = None
 
 
 class CommandRequest(BaseModel):
@@ -145,6 +146,15 @@ def create_app() -> FastAPI:
             BytesIO(exported["content"]),
             media_type=exported["media_type"],
             headers={"Content-Disposition": f'attachment; filename="{exported["filename"]}"'},
+        )
+
+    @api.get("/v1/tasks/{task_id}/wordcloud")
+    async def task_wordcloud(task_id: str) -> StreamingResponse:
+        result = generate_wordcloud(task_id)
+        return StreamingResponse(
+            BytesIO(result["content"]),
+            media_type=result["media_type"],
+            headers={"Content-Disposition": f'attachment; filename="{result["filename"]}"'},
         )
 
     @api.get("/v1/events/stream")

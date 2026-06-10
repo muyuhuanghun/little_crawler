@@ -29,6 +29,8 @@ function init() {
       $("command-input").value = `${btn.dataset.cmd} task_id=${state.selectedTaskId}`;
     });
   });
+  // 词云图按钮 — 直接调用 API，不走命令表单
+  $("btn-wordcloud").addEventListener("click", runWordcloud);
   loadTasks();
 }
 
@@ -40,6 +42,8 @@ async function onSubmitTask(e) {
     limit: Number($("submit-limit").value) || 50,
     depth: Number($("submit-depth").value) || 1,
   };
+  const keyword = $("submit-keyword").value.trim();
+  if (keyword) payload.keyword = keyword;
   const name = $("submit-task-name").value.trim();
   if (name) payload.task_name = name;
   const res = await api("/v1/crawl/submit", { method: "POST", body: JSON.stringify(payload) });
@@ -55,11 +59,22 @@ async function onCommand(e) {
   e.preventDefault();
   const cmd = $("command-input").value.trim();
   if (!cmd) return;
-  const res = await api("/v1/command", { method: "POST", body: JSON.stringify({ command: cmd }) });
-  showOutput("command-output", res);
-  if (res.code === 0 && res.data?.task_id) {
-    selectTask(res.data.task_id);
-    await loadTasks();
+  try {
+    const res = await api("/v1/command", { method: "POST", body: JSON.stringify({ command: cmd }) });
+    console.log("command response:", JSON.stringify(res).substring(0, 200));
+    if (res.code === 0 && res.data && res.data.wordcloud) {
+      showOutput("command-output", { message: "词云图已生成，请查看页面底部", task_id: res.data.task_id });
+      showWordcloudImage(res.data.wordcloud, res.data.task_id);
+    } else {
+      showOutput("command-output", res);
+    }
+    if (res.code === 0 && res.data && res.data.task_id) {
+      selectTask(res.data.task_id);
+      await loadTasks();
+    }
+  } catch (err) {
+    console.error("command error:", err);
+    showOutput("command-output", { error: String(err) });
   }
 }
 
@@ -97,6 +112,48 @@ async function onExport(format) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// 显示词云图图片
+function showWordcloudImage(base64Data, taskId) {
+  const container = $("wordcloud-display");
+  if (!container) return;
+  const imgSrc = `data:image/png;base64,${base64Data}`;
+  container.innerHTML = `
+    <div style="text-align:center; padding:20px; background:var(--card,#1e1e2e); border-radius:12px; margin-bottom:20px;">
+      <h3 style="margin-bottom:12px;">词云图 — ${esc(taskId)}</h3>
+      <img src="${imgSrc}" alt="词云图" style="max-width:100%; border-radius:8px; margin-bottom:10px;">
+      <br>
+      <a href="${imgSrc}" download="${taskId}_wordcloud.png" style="color:var(--accent); text-decoration:underline;">点击下载词云图</a>
+    </div>
+  `;
+  container.scrollIntoView({ behavior: "smooth" });
+}
+
+// 词云图按钮 — 直接调用 API
+async function runWordcloud() {
+  if (!state.selectedTaskId) {
+    showOutput("command-output", { message: "请先选择一个任务", code: 1001 });
+    return;
+  }
+  showOutput("command-output", { message: "正在生成词云图..." });
+  try {
+    const res = await api("/v1/command", {
+      method: "POST",
+      body: JSON.stringify({ command: `wordcloud run task_id=${state.selectedTaskId}` }),
+    });
+    if (res.code === 0 && res.data && res.data.wordcloud) {
+      showOutput("command-output", { message: "词云图已生成，请查看页面下方", task_id: res.data.task_id });
+      showWordcloudImage(res.data.wordcloud, res.data.task_id);
+    } else {
+      showOutput("command-output", res);
+    }
+    if (res.code === 0 && res.data && res.data.task_id) {
+      await loadTasks();
+    }
+  } catch (err) {
+    showOutput("command-output", { error: String(err) });
+  }
 }
 
 // 搜索结果
@@ -152,6 +209,7 @@ async function refreshSelectedTask() {
     detailItem("task_id", t.task_id),
     detailItem("status", t.status),
     detailItem("root_url", t.root_url),
+    detailItem("keyword", t.keyword || "-"),
     detailItem("progress", `${t.progress}%`),
     detailItem("done", String(t.done_count)),
     detailItem("failed", String(t.failed_count)),
@@ -216,6 +274,10 @@ function closeStream() {
 // API 请求
 async function api(url, opts = {}) {
   const resp = await fetch(url, { headers: { "Content-Type": "application/json", ...opts.headers }, ...opts });
+  if (!resp.ok) {
+    const text = await resp.text();
+    try { return JSON.parse(text); } catch(e) { return { code: resp.status, message: text, data: null }; }
+  }
   return resp.json();
 }
 

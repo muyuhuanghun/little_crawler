@@ -1,4 +1,4 @@
-"""数据清洗：规范化、去重、导出。"""
+"""数据清洗：规范化、去重、导出、词云图。"""
 from __future__ import annotations
 
 import csv
@@ -6,12 +6,15 @@ import hashlib
 import html
 import io
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import jieba
 from bs4 import BeautifulSoup
+from wordcloud import WordCloud
 
 from app.db import get_connection
 from app.errors import AppError
@@ -155,6 +158,87 @@ def export_results(task_id: str, export_format: str) -> dict[str, Any]:
     writer.writeheader()
     writer.writerows(items)
     return {"filename": filename, "media_type": "text/csv; charset=utf-8", "content": buf.getvalue().encode("utf-8")}
+
+
+def generate_wordcloud(task_id: str) -> dict[str, Any]:
+    """生成任务清洗结果的词云图，返回 PNG 图片字节。"""
+    _ensure_task_exists(task_id)
+
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT clean_news_title, clean_news_content FROM clean_items WHERE task_id = ? AND clean_status = 'clean_done'",
+            (task_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        raise AppError(3001, "no clean data available for wordcloud")
+
+    # 合并所有标题和正文
+    texts = []
+    for row in rows:
+        if row["clean_news_title"]:
+            texts.append(row["clean_news_title"])
+        if row["clean_news_content"]:
+            texts.append(row["clean_news_content"])
+    full_text = " ".join(texts)
+
+    # jieba 分词
+    words = jieba.cut(full_text, cut_all=False)
+    # 过滤停用词和短词
+    stopwords = {"的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这"}
+    filtered = " ".join(w for w in words if len(w) > 1 and w not in stopwords)
+
+    if not filtered.strip():
+        raise AppError(3001, "no valid words after filtering")
+
+    # 生成词云 - 使用系统字体
+    font_path = _find_chinese_font()
+    wc = WordCloud(
+        font_path=font_path,
+        width=800,
+        height=400,
+        background_color="white",
+        max_words=100,
+        colormap="viridis",
+    )
+    wc.generate(filtered)
+
+    # 转为 PNG 字节
+    buf = io.BytesIO()
+    wc.to_image().save(buf, format="PNG")
+    buf.seek(0)
+
+    return {
+        "filename": f"{task_id}_wordcloud.png",
+        "media_type": "image/png",
+        "content": buf.getvalue(),
+    }
+
+
+def _find_chinese_font() -> str | None:
+    """查找系统中的中文字体。"""
+    # Windows 字体路径
+    win_fonts = [
+        "C:/Windows/Fonts/msyh.ttc",      # 微软雅黑
+        "C:/Windows/Fonts/simhei.ttf",     # 黑体
+        "C:/Windows/Fonts/simsun.ttc",     # 宋体
+    ]
+    for font in win_fonts:
+        if os.path.exists(font):
+            return font
+    # Linux/Mac 常见路径
+    unix_fonts = [
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/System/Library/Fonts/PingFang.ttc",
+    ]
+    for font in unix_fonts:
+        if os.path.exists(font):
+            return font
+    return None  # wordcloud 会使用默认字体
 
 
 def _normalize_date(value: str | None) -> str | None:

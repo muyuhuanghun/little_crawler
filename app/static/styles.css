@@ -20,6 +20,11 @@ body {
   color: var(--text);
   line-height: 1.6;
   padding: 0 16px 40px;
+  overflow-x: hidden;
+}
+
+main {
+  max-width: 100%;
 }
 
 /* 顶部导航 */
@@ -40,6 +45,7 @@ body {
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 16px;
+  min-width: 0;
 }
 .card h2 {
   font-size: 18px;
@@ -69,8 +75,8 @@ body {
   flex-wrap: wrap;
 }
 .form-row input, .form-row select {
-  flex: 1;
-  min-width: 120px;
+  flex: 1 1 120px;
+  min-width: 0;
   padding: 8px 12px;
   border: 1px solid rgba(255,255,255,0.15);
   border-radius: 6px;
@@ -210,6 +216,10 @@ td { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: n
 
 /* 空状态 */
 .empty { color: var(--text-dim); padding: 16px 0; font-size: 13px; }
+
+/* 队列面板 */
+#queue-table-wrap { min-height: 100px; }
+#events-log { min-height: 100px; }
 
 /* 响应式 */
 @media (max-width: 768px) {

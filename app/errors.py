@@ -6,6 +6,7 @@ ERROR_MESSAGES = {
     1004: "unauthorized",
     2001: "task not found",
     2002: "invalid state transition",
+    3001: "wordcloud generation failed",
     5000: "internal server error",
 }
 

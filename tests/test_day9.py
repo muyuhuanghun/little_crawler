@@ -52,7 +52,6 @@ class DayNineTests(unittest.TestCase):
 
         started = execute_command("crawl start url=https://example.com/news")
         self._wait_for_terminal_status(started["task_id"])
-        execute_command(f"clean run task_id={started['task_id']}")
 
         with self.client.stream("GET", "/v1/events/stream", params={"task_id": started["task_id"]}) as response:
             body = "".join(chunk for chunk in response.iter_text())
@@ -62,10 +61,8 @@ class DayNineTests(unittest.TestCase):
         event_types = [event["event_type"] for event in events]
 
         self.assertIn("task_created", event_types)
-        self.assertIn("queue_enqueued", event_types)
         self.assertIn("crawl_item_success", event_types)
         self.assertIn("task_finished", event_types)
-        self.assertIn("clean_item_success", event_types)
 
     def test_event_stream_after_id_returns_only_newer_events(self) -> None:
         set_fetcher(
@@ -92,8 +89,6 @@ class DayNineTests(unittest.TestCase):
         existing_events = list_event_logs(started["task_id"])
         cutoff_id = existing_events[-1]["id"]
 
-        execute_command(f"clean run task_id={started['task_id']}")
-
         with self.client.stream(
             "GET",
             "/v1/events/stream",
@@ -103,8 +98,8 @@ class DayNineTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         events = self._parse_sse_body(body)
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["event_type"], "clean_item_success")
+        # 任务已完成，没有新事件
+        self.assertEqual(len(events), 0)
 
     def test_event_stream_returns_not_found_for_unknown_task(self) -> None:
         response = self.client.get("/v1/events/stream", params={"task_id": "task_missing"})

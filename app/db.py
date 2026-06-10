@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     task_name TEXT,
     root_url TEXT NOT NULL,
+    keyword TEXT,
     status TEXT NOT NULL,
     limit_count INTEGER NOT NULL,
     depth INTEGER NOT NULL,
@@ -105,8 +106,21 @@ def get_connection() -> sqlite3.Connection:
         with _SCHEMA_LOCK:
             if key not in _SCHEMA_INITIALIZED:
                 conn.executescript(SCHEMA_SQL)
+                _migrate_schema(conn)
                 _SCHEMA_INITIALIZED.add(key)
     return conn
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """简单的数据库迁移：添加缺失的列。"""
+    try:
+        # 检查 tasks 表是否有 keyword 列
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+        if "keyword" not in columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN keyword TEXT")
+            conn.commit()
+    except Exception:
+        pass  # 忽略迁移错误，表可能刚创建
 
 
 def init_db() -> None:

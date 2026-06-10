@@ -107,7 +107,7 @@ class DaySevenDayEightTests(unittest.TestCase):
         self._wait_for_terminal_status(started["task_id"])
 
         result = execute_command(f"clean run task_id={started['task_id']}")
-        self.assertIn("raw_total=3", result["output"])
+        self.assertIn("raw=3", result["output"])
         self.assertIn("clean_done=2", result["output"])
 
         task = get_task(started["task_id"])

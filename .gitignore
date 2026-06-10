@@ -2,5 +2,9 @@ __pycache__/
 *.pyc
 data/
 tests/.tmp/
+.venv/
 myvenv/
 .env
+.idea/
+*.docx
+.pytest_cache/

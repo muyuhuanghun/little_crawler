@@ -9,6 +9,7 @@
 - 实时事件流显示爬取进度
 - 数据清洗：去 HTML 标签、日期规范化、去重
 - 结果导出为 JSON 或 CSV
+- 词云图生成：基于 jieba 分词和 wordcloud 生成文本词云
 
 ## 快速开始
 
@@ -28,7 +29,7 @@ python main.py
 ```
 pyms/
 ├── main.py                 # 入口文件
-├── requirements.txt        # 依赖（4个包）
+├── requirements.txt        # 依赖（7个包）
 ├── app/
 │   ├── server.py           # Web 路由（FastAPI）
 │   ├── config.py           # 配置读取
@@ -60,6 +61,7 @@ pyms/
 | `task delete task_id=<...>` | 删除任务 |
 | `queue list task_id=<...>` | 查看队列 |
 | `clean run task_id=<...>` | 执行数据清洗 |
+| `wordcloud run task_id=<...>` | 生成词云图 |
 
 ## API 接口
 
@@ -73,6 +75,7 @@ pyms/
 | GET | `/v1/tasks/{id}/queue` | 队列列表 |
 | GET | `/v1/tasks/{id}/results` | 结果查询 |
 | POST | `/v1/tasks/{id}/export` | 导出结果 |
+| GET | `/v1/tasks/{id}/wordcloud` | 生成词云图(PNG) |
 | GET | `/v1/events/stream` | 实时事件流 |
 | GET | `/v1/health` | 健康检查 |
 

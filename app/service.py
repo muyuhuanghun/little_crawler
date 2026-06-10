@@ -26,6 +26,7 @@ class TaskRecord:
     task_id: str
     task_name: str | None
     root_url: str
+    keyword: str | None
     status: str
     limit: int
     depth: int
@@ -52,6 +53,9 @@ def submit_task(payload: dict[str, Any]) -> dict[str, Any]:
     task_name = payload.get("task_name")
     if task_name is not None and not isinstance(task_name, str):
         raise AppError(1001, "task_name must be a string")
+    keyword = payload.get("keyword")
+    if keyword is not None and not isinstance(keyword, str):
+        raise AppError(1001, "keyword must be a string")
 
     task_id = f"task_{uuid.uuid4().hex[:12]}"
     now = _now()
@@ -59,8 +63,8 @@ def submit_task(payload: dict[str, Any]) -> dict[str, Any]:
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO tasks (task_id, task_name, root_url, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (task_id, task_name or task_id, url, TaskStatus.PENDING.value, limit, depth, 1, 0, 0, 0, now, None, None),
+            "INSERT INTO tasks (task_id, task_name, root_url, keyword, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, task_name or task_id, url, keyword, TaskStatus.PENDING.value, limit, depth, 1, 0, 0, 0, now, None, None),
         )
         conn.execute(
             "INSERT INTO queue_items (task_id, url, state, hop_count, retry_count, priority, last_error, created_at, updated_at) VALUES (?, ?, 'pending', ?, 0, 100, NULL, ?, ?)",
@@ -68,7 +72,7 @@ def submit_task(payload: dict[str, Any]) -> dict[str, Any]:
         )
         conn.execute(
             "INSERT INTO event_logs (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
-            (task_id, "task_created", json.dumps({"root_url": url, "queued_count": 1}, ensure_ascii=True), now),
+            (task_id, "task_created", json.dumps({"root_url": url, "keyword": keyword, "queued_count": 1}, ensure_ascii=True), now),
         )
         conn.commit()
     except Exception:
@@ -85,7 +89,7 @@ def list_tasks() -> list[dict[str, Any]]:
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT task_id, task_name, root_url, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at FROM tasks ORDER BY created_at DESC"
+            "SELECT task_id, task_name, root_url, keyword, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at FROM tasks ORDER BY created_at DESC"
         ).fetchall()
     finally:
         conn.close()
@@ -97,7 +101,7 @@ def get_task(task_id: str) -> dict[str, Any]:
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT task_id, task_name, root_url, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at FROM tasks WHERE task_id = ?",
+            "SELECT task_id, task_name, root_url, keyword, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at FROM tasks WHERE task_id = ?",
             (task_id,),
         ).fetchone()
     finally:
@@ -151,6 +155,9 @@ def transition_task(task_id: str, target_status: str) -> dict[str, Any]:
         conn.execute("UPDATE tasks SET status = ?, started_at = ?, ended_at = ? WHERE task_id = ?", (target.value, started_at, ended_at, task_id))
         if target == TaskStatus.STOPPED:
             conn.execute("UPDATE queue_items SET state = 'canceled', updated_at = ? WHERE task_id = ? AND state IN ('pending', 'running')", (now, task_id))
+        elif target == TaskStatus.PAUSED:
+            # 暂停时将 running 状态的队列项重置为 pending
+            conn.execute("UPDATE queue_items SET state = 'pending', updated_at = ? WHERE task_id = ? AND state = 'running'", (now, task_id))
         conn.execute(
             "INSERT INTO event_logs (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
             (task_id, event_type, json.dumps({"from": task.status, "to": target.value}, ensure_ascii=True), now),
@@ -236,7 +243,7 @@ def _serialize_task(task: TaskRecord) -> dict[str, Any]:
 def _row_to_task(row: Any) -> TaskRecord:
     return TaskRecord(
         task_id=row["task_id"], task_name=row["task_name"], root_url=row["root_url"],
-        status=row["status"], limit=row["limit_count"], depth=row["depth"],
+        keyword=row["keyword"], status=row["status"], limit=row["limit_count"], depth=row["depth"],
         total_count=row["total_count"], done_count=row["done_count"],
         failed_count=row["failed_count"], clean_done_count=row["clean_done_count"],
         created_at=row["created_at"], started_at=row["started_at"], ended_at=row["ended_at"],
@@ -247,7 +254,7 @@ def _get_task_record(task_id: str) -> TaskRecord:
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT task_id, task_name, root_url, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at FROM tasks WHERE task_id = ?",
+            "SELECT task_id, task_name, root_url, keyword, status, limit_count, depth, total_count, done_count, failed_count, clean_done_count, created_at, started_at, ended_at FROM tasks WHERE task_id = ?",
             (task_id,),
         ).fetchone()
     finally:
