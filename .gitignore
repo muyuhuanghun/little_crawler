@@ -6,5 +6,4 @@ tests/.tmp/
 myvenv/
 .env
 .idea/
-*.docx
 .pytest_cache/
