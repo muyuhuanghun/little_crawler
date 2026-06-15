@@ -8,3 +8,9 @@ myvenv/
 .idea/
 .pytest_cache/
 项目要求.md
+
+# PPT Master tool (external dependency)
+ppt_making/
+
+# Generated PPT files
+*.pptx
