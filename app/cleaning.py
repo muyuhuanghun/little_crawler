@@ -267,7 +267,13 @@ def _senta_score(text: str) -> float:
     """使用 Senta 情感模型计算文本情感得分 [0, 1]，>0.6 正面，<0.4 负面。"""
     from snownlp import SnowNLP
     try:
-        s = SnowNLP(text)
+        # 移除可能导致编码问题的特殊字符（如表情符号）
+        cleaned = text.encode('utf-8', errors='ignore').decode('utf-8')
+        # 进一步清理非 BMP 字符（U+10000 以上）
+        cleaned = ''.join(c for c in cleaned if ord(c) < 0x10000)
+        if not cleaned.strip():
+            return 0.5
+        s = SnowNLP(cleaned)
         return s.sentiments
     except Exception:
         return 0.5

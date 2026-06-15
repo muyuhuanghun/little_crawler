@@ -76,6 +76,9 @@ async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
 
 @app.exception(Exception)
 async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+    import traceback
+    print(f"[ERROR] {type(exc).__name__}: {exc}")
+    traceback.print_exc()
     return sanic_json(_err(_rid(request), 5000, ERROR_MESSAGES[5000]), status=500)
 
 
